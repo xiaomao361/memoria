@@ -1,231 +1,285 @@
 #!/usr/bin/env python3
 """
-Memoria remember.py — 写入记忆（双层结构）
+Memoria remember.py — 写入记忆
 
-架构：
-  memoria_full/     → 全量原始对话（完整保留用户+助手所有消息）
-  memoria.json     → 索引层（一句话精华摘要 + 标签 + channel + 引用 full_ref）
+三层存储架构：
+  热存储（session 引用）  → session_path，冷备无忧
+  冷存储（archive/）     → 重要内容永久归档，防止 session 被清理
+  索引（memoria.json）   → 唯一入口，所有检索从这里发起
 
-流程：
-  对话结束 → 全量存入 memoria_full/ → 生成一句话精华 → 写入索引
+多 Claw 兼容：数据路径通过 MEMORIA_DIR 环境变量配置，
+默认 ~/.qclaw/skills/memoria（与 OpenClaw skill 标准路径一致）。
 """
 
 import json
-import uuid
 import sys
 import os
+import uuid
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-MEMORIA_DIR = Path(os.path.expanduser("~/.qclaw/skills/memoria"))
-MEMORIA_FULL_DIR = MEMORIA_DIR / "memoria_full"
+
+def resolve_memoria_dir() -> Path:
+    """解析 Memoria 数据目录，支持环境变量覆盖（多 Claw 共存时各自独立）"""
+    custom = os.environ.get("MEMORIA_DIR", "").strip()
+    if custom:
+        return Path(os.path.expanduser(custom))
+    return Path(os.path.expanduser("~/.qclaw/skills/memoria"))
+
+
+MEMORIA_DIR = resolve_memoria_dir()
+ARCHIVE_DIR = MEMORIA_DIR / "archive"
 MEMORIA_INDEX_FILE = MEMORIA_DIR / "memoria.json"
+SESSIONS_DIR = Path(os.path.expanduser("~/.qclaw/agents/main/sessions"))
+
+# 默认配置
+DEFAULT_DAYS = 7
+DEFAULT_LIMIT = 5
+DEFAULT_CHANNEL = "unknown"
 
 
-def load_index():
+# ──────────────────────────────────────────────
+# 索引读写
+# ──────────────────────────────────────────────
+
+def load_index() -> dict:
     if MEMORIA_INDEX_FILE.exists():
-        with open(MEMORIA_INDEX_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"memories": [], "version": "1.0"}
+        try:
+            with open(MEMORIA_INDEX_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+    return {"memories": [], "version": "3.0"}
 
 
-def save_index(data):
+def save_index(data: dict):
     MEMORIA_DIR.mkdir(parents=True, exist_ok=True)
     with open(MEMORIA_INDEX_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def extract_messages(conversation_data):
-    """
-    从会话历史中提取完整消息（用户 + 助手，全部保留）
-    支持两种格式：
-      1. OpenClaw 标准格式：[{"role": "user/assistant", "content": [...]}]
-      2. 简单格式：[{"role": "user/assistant", "text": "..."}]
-    """
+# ──────────────────────────────────────────────
+# Session 全量读取
+# ──────────────────────────────────────────────
+
+def extract_messages_from_jsonl(jsonl_path: str) -> list:
+    """从 OpenClaw session JSONL 提取用户+助手消息"""
     messages = []
-    for msg in conversation_data:
-        role = msg.get("role", "unknown")
-        if role not in ("user", "assistant"):
-            continue
-
-        # 格式1：content 是列表
-        contents = msg.get("content", [])
-        if isinstance(contents, list):
-            for c in contents:
-                if isinstance(c, dict) and c.get("type") == "text":
-                    text = c.get("text", "").strip()
-                    if text:
-                        messages.append({
-                            "role": role,
-                            "text": text,
-                            "timestamp": msg.get("timestamp", "")
-                        })
-        # 格式2：content 是字符串
-        elif isinstance(contents, str) and contents.strip():
-            messages.append({
-                "role": role,
-                "text": contents.strip(),
-                "timestamp": msg.get("timestamp", "")
-            })
-        # 格式3：直接有 text 字段
-        elif msg.get("text"):
-            messages.append({
-                "role": role,
-                "text": msg["text"].strip(),
-                "timestamp": msg.get("timestamp", "")
-            })
-
+    if not jsonl_path or not Path(jsonl_path).exists():
+        return messages
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg_type = obj.get("type", "")
+            if msg_type not in ("message",):
+                continue
+            msg = obj.get("message", {})
+            role = msg.get("role", "")
+            if role not in ("user", "assistant"):
+                continue
+            timestamp = obj.get("timestamp", "")
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for c in content:
+                    if isinstance(c, dict) and c.get("type") == "text":
+                        text = c.get("text", "").strip()
+                        if text:
+                            messages.append({"role": role, "text": text, "timestamp": timestamp})
+            elif isinstance(content, str) and content.strip():
+                messages.append({"role": role, "text": content.strip(), "timestamp": timestamp})
     return messages
 
 
-def generate_one_line_summary(messages, summary_override=None):
-    """
-    生成一句话精华摘要。
-    
-    优先使用 summary_override（人工指定）。
-    否则从对话中提取：取用户核心问题 + 助手核心结论，压缩成一句话。
-    """
-    if summary_override:
-        return summary_override
+def count_messages(jsonl_path: str) -> int:
+    """统计 session 中的 user+assistant 消息数"""
+    count = 0
+    if not jsonl_path or not Path(jsonl_path).exists():
+        return 0
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line in f:
+            try:
+                obj = json.loads(line.strip())
+                if obj.get("type") == "message":
+                    msg = obj.get("message", {})
+                    if msg.get("role") in ("user", "assistant"):
+                        count += 1
+            except Exception:
+                continue
+    return count
 
+
+def get_latest_session() -> tuple:
+    """获取最新 session JSONL 的 path 和 session_id"""
+    if not SESSIONS_DIR.exists():
+        return None, None
+    files = sorted(SESSIONS_DIR.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not files:
+        return None, None
+    latest = files[0]
+    session_id = latest.stem
+    return str(latest), session_id
+
+
+# ──────────────────────────────────────────────
+# 冷存储：备份到 archive/
+# ──────────────────────────────────────────────
+
+def archive_session(session_path: str, session_id: str, session_label: str, channel: str) -> str | None:
+    """
+    将 session 内容备份到冷存储 archive/。
+    路径格式：archive/{YYYY-MM}/{channel}_{session_id}.json
+    返回归档文件路径，失败返回 None。
+    """
+    if not session_path or not Path(session_path).exists():
+        return None
+    messages = extract_messages_from_jsonl(session_path)
     if not messages:
-        return "（空对话）"
-
-    user_msgs = [m["text"] for m in messages if m["role"] == "user"]
-    asst_msgs = [m["text"] for m in messages if m["role"] == "assistant"]
-
-    # 取第一条用户消息（话题起点）
-    first_user = user_msgs[0][:80] if user_msgs else ""
-    # 取最后一条助手消息（结论）
-    last_asst = asst_msgs[-1][:120] if asst_msgs else ""
-
-    if first_user and last_asst:
-        return f"{first_user}... → {last_asst}..."
-    elif first_user:
-        return first_user
-    elif last_asst:
-        return last_asst
-    else:
-        return "（无有效内容）"
-
-
-def save_full_transcript(messages, session_label="unknown"):
-    """存入 memoria_full/，返回文件路径"""
-    today = datetime.now().astimezone().strftime("%Y-%m-%d")
-    date_dir = MEMORIA_FULL_DIR / today
-    date_dir.mkdir(parents=True, exist_ok=True)
-
-    filename = f"{session_label[:50]}_{datetime.now().strftime('%H%M%S')}.json"
-    filepath = date_dir / filename
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump({
-            "stored_at": datetime.now().astimezone().isoformat(),
-            "session_label": session_label,
-            "message_count": len(messages),
-            "messages": messages
-        }, f, ensure_ascii=False, indent=2)
-
-    return str(filepath)
+        return None
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    month_dir = ARCHIVE_DIR / now.strftime("%Y-%m")
+    month_dir.mkdir(parents=True, exist_ok=True)
+    safe_label = session_label.replace("/", "_").replace("\\", "_")[:30]
+    archive_file = month_dir / f"{channel}_{safe_label}_{session_id[:8]}.json"
+    archive_data = {
+        "archived_at": now.isoformat(),
+        "channel": channel,
+        "session_label": session_label,
+        "session_id": session_id,
+        "message_count": len(messages),
+        "messages": messages
+    }
+    try:
+        with open(archive_file, "w", encoding="utf-8") as f:
+            json.dump(archive_data, f, ensure_ascii=False, indent=2)
+        return str(archive_file)
+    except IOError:
+        return None
 
 
-def write_memory(channel: str, tags: list, conversation_data: list,
-                 session_label: str = "unknown", summary_override: str = None):
+# ──────────────────────────────────────────────
+# 核心写入逻辑
+# ──────────────────────────────────────────────
+
+def write_memory(
+    channel: str,
+    tags: list,
+    session_id: str = None,
+    session_path: str = None,
+    session_label: str = "unknown",
+    summary: str = None,
+    cold_archive: bool = False,
+) -> dict:
     """
-    写入记忆（双层结构）
+    写入一条记忆索引。
 
     Args:
-        channel: 渠道标识（feishu/wechat/webchat/qclaw-ios/cli）
-        tags: 标签列表
-        conversation_data: 完整对话历史（用户+助手所有消息）
+        channel:       渠道标识（feishu/webchat/wechat/cli/...）
+        tags:          标签列表
+        session_id:    OpenClaw session UUID（可选，默认取最新）
+        session_path:  session JSONL 路径（可选，默认取最新）
         session_label: session 描述标签
-        summary_override: 人工指定的一句话精华（可选，否则自动生成）
+        summary:       精华摘要（必须由调用方总结传入）
+        cold_archive:  是否同时备份到冷存储（archive/）
+
+    Returns:
+        写入的索引条目 dict
     """
-    # 1. 提取完整消息（用户+助手全部保留）
-    messages = extract_messages(conversation_data)
+    # 自动获取最新 session
+    if not session_path or not session_id:
+        _sp, _sid = get_latest_session()
+        session_path = session_path or _sp
+        session_id = session_id or _sid
 
-    # 2. 存入全量（完整对话）
-    full_path = save_full_transcript(messages, session_label)
+    if session_path and Path(session_path).exists():
+        msg_count = count_messages(session_path)
+    else:
+        msg_count = 0
 
-    # 3. 生成一句话精华摘要
-    summary = generate_one_line_summary(messages, summary_override)
+    # 冷存储
+    cold_path = None
+    if cold_archive and session_path:
+        cold_path = archive_session(session_path, session_id, session_label, channel)
 
-    # 4. 写入索引
     memory_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
     entry = {
         "id": memory_id,
-        "timestamp": datetime.now().astimezone().isoformat(),
+        "timestamp": now,
         "channel": channel,
         "tags": tags,
-        "summary": summary,
-        "full_ref": full_path,
-        "message_count": len(messages)
+        "summary": summary or "（未提供摘要）",
+        # 热存储：指向 OpenClaw 原生 session
+        "session_id": session_id or "",
+        "session_path": session_path or "",
+        # 冷存储：指向 archive/ 备份（可能为空）
+        "cold_path": cold_path or "",
+        # 元数据
+        "session_label": session_label,
+        "message_count": msg_count,
+        "storage_type": "cold+hot" if cold_path else "hot",
     }
 
     data = load_index()
-    data["memories"].insert(0, entry)  # 最新在前
+    data["memories"].insert(0, entry)
     save_index(data)
 
-    return {
-        "id": memory_id,
-        "full_ref": full_path,
-        "summary": summary,
-        "tags": tags,
-        "message_count": len(messages)
-    }
+    return entry
 
+
+# ──────────────────────────────────────────────
+# CLI 入口
+# ──────────────────────────────────────────────
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Memoria 写入记忆")
+    parser = argparse.ArgumentParser(description="Memoria — 写入记忆")
     parser.add_argument("--channel", required=True,
-                        help="渠道，如 feishu/webchat/wechat/qclaw-ios/cli")
+                        help="渠道：feishu / webchat / wechat / cli / ...（其他 Claw 可自定义）")
     parser.add_argument("--tags", default="",
                         help="标签，逗号分隔")
     parser.add_argument("--session-label", default="unknown",
-                        help="session 描述")
-    parser.add_argument("--summary", default=None,
-                        help="人工指定一句话精华（可选，默认自动生成）")
-    parser.add_argument("--messages-file", default=None,
-                        help="完整对话历史 JSON 文件路径")
+                        help="session 描述标签")
+    parser.add_argument("--summary", required=True,
+                        help="精华摘要（Clara 总结，禁止原文摘取）")
+    parser.add_argument("--session-id", default=None,
+                        help="指定 session UUID（默认取最新）")
+    parser.add_argument("--session-path", default=None,
+                        help="指定 session JSONL 路径（默认取最新）")
+    parser.add_argument("--archive", action="store_true",
+                        help="同时备份到冷存储（archive/）")
 
     args = parser.parse_args()
-
-    # 读取对话数据
-    if args.messages_file:
-        with open(args.messages_file, "r", encoding="utf-8") as f:
-            conversation_data = json.load(f)
-    else:
-        stdin_data = sys.stdin.read()
-        if stdin_data.strip():
-            try:
-                conversation_data = json.loads(stdin_data)
-            except json.JSONDecodeError:
-                print("❌ stdin 数据不是有效的 JSON", file=sys.stderr)
-                sys.exit(1)
-        else:
-            print("❌ 未提供对话数据（--messages-file 或 stdin）", file=sys.stderr)
-            sys.exit(1)
-
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
 
     result = write_memory(
         channel=args.channel,
         tags=tags,
-        conversation_data=conversation_data,
+        session_id=args.session_id,
+        session_path=args.session_path,
         session_label=args.session_label,
-        summary_override=args.summary
+        summary=args.summary,
+        cold_archive=args.archive,
     )
 
-    print(f"✅ 记忆已写入")
+    storage = result.get("storage_type", "hot")
+    cold_info = f"\n   冷存储：{result.get('cold_path', '')}" if result.get("cold_path") else ""
+    print(f"✅ 记忆已写入 [{storage}]")
     print(f"   ID: {result['id']}")
-    print(f"   渠道: {args.channel}")
+    print(f"   渠道: {result['channel']}")
     print(f"   标签: {', '.join(result['tags']) or '无'}")
     print(f"   消息数: {result['message_count']}")
-    print(f"   全量路径: {result['full_ref']}")
-    print(f"")
-    print(f"精华摘要：")
-    print(f"  {result['summary']}")
+    print(f"   热存储: {result.get('session_path', '')}")
+    print(f"   Session: {result.get('session_id', '')}")
+    print(cold_info)
+    print(f"\n精华摘要：{result['summary']}")
 
 
 if __name__ == "__main__":
