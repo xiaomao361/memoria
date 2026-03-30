@@ -23,6 +23,7 @@ env/
 # Memoria 数据（不提交个人记忆）
 memoria.json
 memoria_full/
+archive/
 
 # 本地配置
 config/local.yaml
