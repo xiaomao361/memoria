@@ -112,7 +112,7 @@ python3 recall.py --ref ~/.qclaw/skills/memoria/memoria_full/2026-03-30/xxx.json
 |---|---|---|
 | RECALL_DAYS | 7 | 默认拉取 7 天内记忆 |
 | RECALL_MAX | 5 | 最多注入 5 条 |
-| AUTO_SUMMARY | 启发式提取 | 一期摘要策略（用户首句 + 助手末句） |
+| AUTO_SUMMARY | 一句话精华 | 用户核心问题 + 助手核心结论，压缩成一句话 |
 
 ## 渠道标识
 
