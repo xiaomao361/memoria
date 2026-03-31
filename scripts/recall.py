@@ -239,7 +239,7 @@ def main():
     title = ""
 
     if args.combined:
-        memories = load_combined_memories(days=args.days, recent_limit=3, important_limit=2)
+        memories = load_combined_memories(days=args.days, recent_limit=10, important_limit=5)
         title = "📚 Combined Memories (Recent + Important)"
     elif args.search:
         memories = search_memories(args.search, limit=args.limit)
