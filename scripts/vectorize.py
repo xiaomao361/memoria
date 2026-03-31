@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Vectorize memories using nomic-embed-text via Ollama.
-Stores vectors in ChromaDB for semantic search.
+Vectorize memories directly from sessions/archive to ChromaDB.
+No intermediate memoria.json needed.
 
 Key design: vectorize SUMMARIES not raw conversations.
-Summaries are short (< 50 chars), never exceed embedding model limits.
+Summaries are short (< 100 chars), never exceed embedding model limits.
 
 Usage:
-    python3 vectorize.py                    # Full re-vectorization from memoria.json
-    python3 vectorize.py --incremental      # Only new memories
-    python3 vectorize.py --from-sessions    # Vectorize from sessions (auto-summarize)
-    python3 vectorize.py --search "query"   # Semantic search
+    python3 vectorize.py                      # Incremental from sessions
+    python3 vectorize.py --from-archive       # Backfill from archive
+    python3 vectorize.py --full               # Full re-index
+    python3 vectorize.py --search "query"     # Semantic search
 """
 
 import json
@@ -19,7 +19,7 @@ import argparse
 import hashlib
 import uuid
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 
 try:
@@ -29,10 +29,10 @@ except ImportError:
     sys.exit(1)
 
 # Paths
-MEMORIA_JSON = Path.home() / ".qclaw/skills/memoria/memoria.json"
+SESSIONS_DIR = Path.home() / ".qclaw/agents/main/sessions"
+ARCHIVE_DIR = Path.home() / ".qclaw/skills/memoria/archive"
 CHROMA_DB_PATH = Path.home() / ".qclaw/memoria/chroma_db"
 VECTORIZE_STATE = Path.home() / ".qclaw/memoria/vectorize_state.json"
-SESSIONS_DIR = Path.home() / ".qclaw/agents/main/sessions"
 
 # Ollama config
 OLLAMA_BASE_URL = "http://localhost:11434"
@@ -41,12 +41,10 @@ SUMMARY_MODEL = "qwen2.5:7b"
 
 
 def get_embedding(text: str) -> list:
-    """Get embedding from Ollama. Input must be short (summary-level)."""
-    # 严格截断到 500 字符，摘要级别，绝对不超限
+    """Get embedding from Ollama."""
     text = text[:500].strip()
     if not text:
         return None
-
     try:
         response = requests.post(
             f"{OLLAMA_BASE_URL}/api/embeddings",
@@ -60,51 +58,26 @@ def get_embedding(text: str) -> list:
         return None
 
 
-def generate_summary(session_id: str) -> str:
-    """Generate summary from session using qwen2.5:7b."""
-    session_file = SESSIONS_DIR / f"{session_id}.jsonl"
-    if not session_file.exists():
+def generate_summary(messages: list) -> str:
+    """Generate summary using qwen2.5:7b."""
+    if not messages:
         return ""
-
-    # 提取前 10 条对话
+    
+    # 取前 15 条
     texts = []
-    try:
-        with open(session_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if obj.get("type") != "message":
-                        continue
-                    msg = obj.get("message", {})
-                    role = msg.get("role", "")
-                    if role not in ("user", "assistant"):
-                        continue
-                    content = msg.get("content", [])
-                    text = ""
-                    if isinstance(content, list):
-                        for c in content:
-                            if isinstance(c, dict) and c.get("type") == "text":
-                                text = c.get("text", "").strip()
-                                break
-                    elif isinstance(content, str):
-                        text = content.strip()
-                    if text and "Sender (untrusted metadata)" not in text:
-                        texts.append(f"{role.upper()}: {text[:200]}")
-                        if len(texts) >= 20:
-                            break
-                except:
-                    continue
-    except:
-        return ""
-
+    for m in messages[:15]:
+        role = m.get("role", "")
+        text = m.get("text", m.get("content", ""))
+        if text and "Sender (untrusted metadata)" not in text:
+            prefix = "👤" if role == "user" else "🤖"
+            texts.append(f"{prefix} {text[:200]}")
+    
     if not texts:
         return ""
-
+    
     conversation = "\n".join(texts[:10])
     prompt = f"""你是一个记忆整理助手。
-以下是一段对话，请用一句话总结核心内容（15-30字以内，不要超过30字）：
+以下是一段对话，请用一句话总结核心内容（20-50字，不要超过50字）：
 
 {conversation}
 
@@ -119,11 +92,103 @@ def generate_summary(session_id: str) -> str:
         response.raise_for_status()
         summary = response.json().get("response", "").strip()
         if summary:
-            return summary.split("\n")[0].strip()[:50]
+            return summary.split("\n")[0].strip()[:80]
     except Exception as e:
         print(f"⚠️  Summary failed: {e}")
-
+    
+    # Fallback: 取第一条用户消息
+    for m in messages:
+        if m.get("role") == "user":
+            text = m.get("text", m.get("content", ""))[:60]
+            return text + "..." if len(text) == 60 else text
     return ""
+
+
+def extract_messages_from_jsonl(path: Path) -> list:
+    """Extract messages from session JSONL."""
+    messages = []
+    if not path.exists():
+        return messages
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except:
+                    continue
+                if obj.get("type") != "message":
+                    continue
+                msg = obj.get("message", {})
+                role = msg.get("role", "")
+                if role not in ("user", "assistant"):
+                    continue
+                timestamp = obj.get("timestamp", "")
+                content = msg.get("content", [])
+                text = ""
+                if isinstance(content, list):
+                    for c in content:
+                        if isinstance(c, dict) and c.get("type") == "text":
+                            text = c.get("text", "").strip()
+                            break
+                elif isinstance(content, str):
+                    text = content.strip()
+                if text:
+                    messages.append({"role": role, "text": text, "timestamp": timestamp})
+    except Exception as e:
+        print(f"⚠️  Failed to read {path.name}: {e}")
+    return messages
+
+
+def extract_messages_from_archive(path: Path) -> list:
+    """Extract messages from archive JSON."""
+    try:
+        d = json.load(open(path, 'r', encoding='utf-8'))
+        return d.get("messages", [])
+    except Exception as e:
+        print(f"⚠️  Failed to read archive {path.name}: {e}")
+        return []
+
+
+def infer_tags(messages: list) -> list:
+    """Infer tags from message content."""
+    all_text = " ".join((m.get("text", m.get("content", "")).lower() for m in messages))
+    tags = []
+    tag_map = {
+        "memoria": ["memoria", "记忆系统"],
+        "织影": ["织影", "aelovia", "weave"],
+        "副业": ["副业", "兼职", "收入"],
+        "埃洛维亚": ["埃洛维亚", "世界观"],
+        "技术": ["python", "linux", "服务器", "架构", "运维"],
+        "日常": ["日常", "聊天"],
+        "日程": ["日历", "日程", "提醒", "cron", "日报"],
+        "ThreadVibe": ["threadvibe", "websocket"],
+    }
+    for tag, keywords in tag_map.items():
+        if any(kw in all_text for kw in keywords):
+            tags.append(tag)
+    return tags or ["未分类"]
+
+
+def infer_channel(path: Path, messages: list) -> str:
+    """Infer channel from path or content."""
+    filename = path.name.lower()
+    if "feishu" in filename:
+        return "feishu"
+    if "wechat" in filename:
+        return "wechat"
+    # Check first user message
+    for m in messages:
+        if m.get("role") == "user":
+            text = m.get("text", m.get("content", "")).lower()
+            if "feishu" in text or "飞书" in text:
+                return "feishu"
+            if "wechat" in text or "微信" in text:
+                return "wechat"
+            break
+    return "webchat"
 
 
 def get_chroma_collection():
@@ -131,16 +196,6 @@ def get_chroma_collection():
     CHROMA_DB_PATH.mkdir(parents=True, exist_ok=True)
     client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
     return client.get_or_create_collection(name="memories", metadata={"hnsw:space": "cosine"})
-
-
-def load_memories() -> dict:
-    """Load memoria.json."""
-    if not MEMORIA_JSON.exists():
-        print(f"⚠️  {MEMORIA_JSON} not found")
-        return {}
-    with open(MEMORIA_JSON, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    return {m["id"]: m for m in data.get("memories", [])}
 
 
 def load_vectorize_state() -> dict:
@@ -153,145 +208,185 @@ def load_vectorize_state() -> dict:
 def save_vectorize_state(state: dict):
     VECTORIZE_STATE.parent.mkdir(parents=True, exist_ok=True)
     with open(VECTORIZE_STATE, 'w', encoding='utf-8') as f:
-        json.dump(state, f, indent=2)
+        json.dump(state, f, indent=2, ensure_ascii=False)
 
 
-def get_memory_hash(memory: dict) -> str:
-    content = f"{memory['id']}:{memory['summary']}:{memory['tags']}"
+def get_session_hash(path: Path) -> str:
+    """Hash based on file mtime and size."""
+    stat = path.stat()
+    content = f"{path.name}:{stat.st_mtime}:{stat.st_size}"
     return hashlib.md5(content.encode()).hexdigest()
 
 
-def vectorize_memories(incremental: bool = False, memory_id: str = None):
-    """Vectorize memories from memoria.json — uses summary as embedding input."""
+def vectorize_from_sessions(incremental: bool = True):
+    """Vectorize from sessions directory."""
     collection = get_chroma_collection()
-    memories = load_memories()
     state = load_vectorize_state()
     vectorized = state.get("vectorized", {})
 
-    if not memories:
-        print("⚠️  No memories to vectorize")
-        return
+    session_files = [f for f in SESSIONS_DIR.glob("*.jsonl") if ".deleted." not in f.name]
+    print(f"📁 发现 {len(session_files)} 个 session 文件")
 
-    if memory_id:
-        to_process = {memory_id: memories[memory_id]} if memory_id in memories else {}
-    elif incremental:
-        to_process = {
-            mid: m for mid, m in memories.items()
-            if mid not in vectorized or vectorized[mid].get("hash") != get_memory_hash(m)
-        }
-    else:
-        to_process = memories
+    to_process = []
+    for f in session_files:
+        session_id = f.stem
+        if incremental and session_id in vectorized:
+            file_hash = get_session_hash(f)
+            if vectorized[session_id].get("hash") == file_hash:
+                continue  # 未变化，跳过
+        to_process.append(f)
 
     if not to_process:
-        print("✅ All memories already vectorized")
+        print("✅ 所有 session 已向量化，无需处理")
         return
 
-    print(f"🔄 Vectorizing {len(to_process)} memories...")
+    print(f"🔄 需要处理 {len(to_process)} 个 session...")
     success_count = 0
 
-    for mid, memory in to_process.items():
-        # 只用摘要 + 标签，短文本，绝对不超限
-        text = f"{memory['summary']} {' '.join(memory.get('tags', []))}"
-
+    for i, f in enumerate(to_process, 1):
+        session_id = f.stem
+        print(f"  [{i}/{len(to_process)}] {session_id[:8]}...", end=" ")
+        
+        messages = extract_messages_from_jsonl(f)
+        if not messages:
+            print("⚠️  无消息")
+            continue
+        
+        # 生成摘要
+        summary = generate_summary(messages)
+        if not summary:
+            print("⚠️  无摘要")
+            continue
+        
+        # 向量化
+        text = f"{summary} {' '.join(infer_tags(messages))}"
         embedding = get_embedding(text)
         if not embedding:
-            print(f"⚠️  Failed to embed {mid[:8]}")
+            print("❌ 向量化失败")
             continue
-
+        
+        # 存入 ChromaDB
         try:
             collection.upsert(
-                ids=[mid],
-                embeddings=[embedding],
-                documents=[memory['summary']],
-                metadatas=[{
-                    "timestamp": memory['timestamp'],
-                    "channel": memory['channel'],
-                    "tags": ",".join(memory.get('tags', [])),
-                    "session_id": memory.get('session_id', ''),
-                }]
-            )
-            vectorized[mid] = {
-                "hash": get_memory_hash(memory),
-                "vectorized_at": datetime.now().isoformat(),
-                "embedding_model": EMBEDDING_MODEL
-            }
-            success_count += 1
-            print(f"✅ {mid[:8]}... done")
-        except Exception as e:
-            print(f"❌ Failed to store {mid[:8]}: {e}")
-
-    state["vectorized"] = vectorized
-    state["last_vectorized"] = datetime.now().isoformat()
-    state["total_vectorized"] = len(vectorized)
-    save_vectorize_state(state)
-
-    print(f"\n✨ Done: {success_count}/{len(to_process)}")
-    print(f"📊 Total vectorized: {len(vectorized)}")
-
-
-def vectorize_from_sessions(session_ids: list = None):
-    """Vectorize directly from sessions — auto-generate summary first, then embed."""
-    collection = get_chroma_collection()
-
-    if not session_ids:
-        session_files = list(SESSIONS_DIR.glob("*.jsonl"))
-        session_ids = [f.stem for f in session_files if ".deleted." not in f.name]
-
-    if not session_ids:
-        print("⚠️  No sessions found")
-        return
-
-    print(f"🔄 Vectorizing {len(session_ids)} sessions (summarize → embed)...")
-    state = load_vectorize_state()
-    vectorized = state.get("vectorized", {})
-    success_count = 0
-
-    for session_id in session_ids:
-        # Step 1: 生成摘要（短文本）
-        print(f"  📝 Summarizing {session_id[:8]}...")
-        summary = generate_summary(session_id)
-        if not summary:
-            print(f"  ⚠️  No summary for {session_id[:8]}, skipping")
-            continue
-
-        print(f"     → {summary}")
-
-        # Step 2: 向量化摘要（绝对不超限）
-        embedding = get_embedding(summary)
-        if not embedding:
-            print(f"  ❌ Embedding failed for {session_id[:8]}")
-            continue
-
-        # Step 3: 存入 ChromaDB
-        memory_id = str(uuid.uuid4())
-        try:
-            collection.upsert(
-                ids=[memory_id],
+                ids=[session_id],
                 embeddings=[embedding],
                 documents=[summary],
                 metadatas=[{
-                    "timestamp": datetime.now().isoformat(),
-                    "channel": "webchat",
-                    "tags": "session-vectorized",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "channel": infer_channel(f, messages),
+                    "tags": ",".join(infer_tags(messages)),
                     "session_id": session_id,
+                    "message_count": len(messages),
                 }]
             )
-            vectorized[memory_id] = {
-                "session_id": session_id,
-                "vectorized_at": datetime.now().isoformat(),
-                "embedding_model": EMBEDDING_MODEL
+            vectorized[session_id] = {
+                "hash": get_session_hash(f),
+                "vectorized_at": datetime.now(timezone.utc).isoformat(),
+                "message_count": len(messages),
             }
             success_count += 1
-            print(f"  ✅ {session_id[:8]}... saved")
+            print(f"✅ {summary[:40]}")
         except Exception as e:
-            print(f"  ❌ Store failed: {e}")
+            print(f"❌ 存储失败: {e}")
 
     state["vectorized"] = vectorized
-    state["last_vectorized"] = datetime.now().isoformat()
+    state["last_vectorized"] = datetime.now(timezone.utc).isoformat()
     state["total_vectorized"] = len(vectorized)
     save_vectorize_state(state)
 
-    print(f"\n✨ Done: {success_count}/{len(session_ids)} sessions")
+    print(f"\n✨ 完成: {success_count}/{len(to_process)}")
+    print(f"📊 向量库总计: {len(vectorized)} 条")
+
+
+def vectorize_from_archive():
+    """Backfill from archive directory."""
+    collection = get_chroma_collection()
+    state = load_vectorize_state()
+    vectorized = state.get("vectorized", {})
+
+    archive_files = list(ARCHIVE_DIR.glob("*/*.json"))
+    print(f"📁 发现 {len(archive_files)} 个归档文件")
+
+    to_process = []
+    for f in archive_files:
+        # 从文件名提取 session_id
+        session_id = f.stem.split("_")[-1]
+        if session_id in vectorized:
+            continue
+        to_process.append(f)
+
+    if not to_process:
+        print("✅ 所有归档已向量化，无需处理")
+        return
+
+    print(f"🔄 需要处理 {len(to_process)} 个归档...")
+    success_count = 0
+
+    for i, f in enumerate(to_process, 1):
+        # 从文件名提取 session_id
+        session_id = f.stem.split("_")[-1]
+        print(f"  [{i}/{len(to_process)}] {session_id[:8]}...", end=" ")
+        
+        messages = extract_messages_from_archive(f)
+        if not messages:
+            print("⚠️  无消息")
+            continue
+        
+        # 从归档读取元数据
+        try:
+            d = json.load(open(f, 'r', encoding='utf-8'))
+            archived_at = d.get("archived_at", "")
+            channel = d.get("channel", infer_channel(f, messages))
+            session_label = d.get("session_label", "")[:50]
+        except:
+            archived_at = ""
+            channel = infer_channel(f, messages)
+            session_label = ""
+        
+        # 生成摘要
+        summary = generate_summary(messages)
+        if not summary:
+            summary = f"历史归档: {session_label}" if session_label else "历史归档对话"
+        
+        # 向量化
+        text = f"{summary} {' '.join(infer_tags(messages))}"
+        embedding = get_embedding(text)
+        if not embedding:
+            print("❌ 向量化失败")
+            continue
+        
+        # 存入 ChromaDB
+        try:
+            collection.upsert(
+                ids=[session_id],
+                embeddings=[embedding],
+                documents=[summary],
+                metadatas=[{
+                    "timestamp": archived_at or datetime.now(timezone.utc).isoformat(),
+                    "channel": channel,
+                    "tags": ",".join(infer_tags(messages)),
+                    "session_id": session_id,
+                    "message_count": len(messages),
+                    "source": "archive",
+                }]
+            )
+            vectorized[session_id] = {
+                "vectorized_at": datetime.now(timezone.utc).isoformat(),
+                "message_count": len(messages),
+                "source": "archive",
+            }
+            success_count += 1
+            print(f"✅ {summary[:40]}")
+        except Exception as e:
+            print(f"❌ 存储失败: {e}")
+
+    state["vectorized"] = vectorized
+    state["last_vectorized"] = datetime.now(timezone.utc).isoformat()
+    state["total_vectorized"] = len(vectorized)
+    save_vectorize_state(state)
+
+    print(f"\n✨ 完成: {success_count}/{len(to_process)}")
+    print(f"📊 向量库总计: {len(vectorized)} 条")
 
 
 def search_memories(query: str, limit: int = 5):
@@ -308,20 +403,24 @@ def search_memories(query: str, limit: int = 5):
         print("❌ No similar memories found")
         return
 
-    print(f"\n🔍 Search results for: '{query}'\n")
-    for i, (mid, doc, distance) in enumerate(zip(
-        results["ids"][0], results["documents"][0], results["distances"][0]
+    print(f"\n🔍 搜索: '{query}'\n")
+    for i, (mid, doc, distance, meta) in enumerate(zip(
+        results["ids"][0],
+        results["documents"][0],
+        results["distances"][0],
+        results["metadatas"][0]
     ), 1):
-        similarity = 1 - distance
-        print(f"{i}. [{mid[:8]}...] (similarity: {similarity:.2%})")
-        print(f"   {doc[:100]}\n")
+        similarity = max(0, (1 - distance)) * 100
+        ts = meta.get("timestamp", "")[:10]
+        ch = meta.get("channel", "?")
+        tags = meta.get("tags", "")
+        print(f"[{ts}][{ch}][{tags}] {doc}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Vectorize memories for semantic search")
-    parser.add_argument("--incremental", action="store_true", help="Only vectorize new/changed memories")
-    parser.add_argument("--memory-id", type=str, help="Vectorize specific memory by ID")
-    parser.add_argument("--from-sessions", action="store_true", help="Vectorize from sessions (auto-summarize)")
+    parser.add_argument("--from-archive", action="store_true", help="Backfill from archive")
+    parser.add_argument("--full", action="store_true", help="Full re-index (ignore incremental)")
     parser.add_argument("--search", type=str, help="Search memories by query")
     parser.add_argument("--limit", type=int, default=5, help="Search result limit")
 
@@ -329,10 +428,10 @@ def main():
 
     if args.search:
         search_memories(args.search, args.limit)
-    elif args.from_sessions:
-        vectorize_from_sessions()
+    elif args.from_archive:
+        vectorize_from_archive()
     else:
-        vectorize_memories(incremental=args.incremental, memory_id=args.memory_id)
+        vectorize_from_sessions(incremental=not args.full)
 
 
 if __name__ == "__main__":

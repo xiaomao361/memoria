@@ -83,7 +83,7 @@ def format_memory(memory_id: str, document: str, metadata: dict, distance: float
     return output
 
 
-def load_combined_memories(days: int = 7, recent_limit: int = 3, important_limit: int = 2) -> list:
+def load_combined_memories(days: int = 7, recent_limit: int = 10, important_limit: int = 5) -> list:
     collection = get_chroma_collection()
 
     if collection.count() == 0:
