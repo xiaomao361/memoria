@@ -1,297 +1,262 @@
 #!/usr/bin/env python3
 """
-Memoria recall.py — 检索记忆
+Recall memories from ChromaDB with semantic search.
+Replaces memoria.json-based lookup with direct ChromaDB queries.
 
-检索策略：
-  1. 索引优先：从 memoria.json 获取摘要（轻量，默认）
-  2. 按需展开：根据 storage_type 选择读取来源
-     - hot → 读 OpenClaw session JSONL
-     - cold → 读 archive/ 备份文件
-     - cold+hot → 优先 archive，fallback 到 session
-
-多 Claw 兼容：通过 MEMORIA_DIR 环境变量配置数据路径。
+Usage:
+    python3 recall.py --combined --simple              # Load combined memories (default)
+    python3 recall.py --search "query"                 # Semantic search
+    python3 recall.py --search "query" --limit 10      # Search with limit
+    python3 recall.py --recent --days 7 --limit 5      # Recent memories
+    python3 recall.py --important --limit 3            # Important memories only
 """
 
-import json
 import sys
-import os
-from datetime import datetime, timezone, timedelta
+import argparse
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+import requests
+
+try:
+    import chromadb
+except ImportError:
+    print("❌ ChromaDB not installed. Run: pip3 install chromadb")
+    sys.exit(1)
+
+# Paths
+CHROMA_DB_PATH = Path.home() / ".qclaw/memoria/chroma_db"
+OLLAMA_BASE_URL = "http://localhost:11434"
+EMBEDDING_MODEL = "bge-m3"
 
 
-def resolve_memoria_dir() -> Path:
-    custom = os.environ.get("MEMORIA_DIR", "").strip()
-    if custom:
-        return Path(os.path.expanduser(custom))
-    return Path(os.path.expanduser("~/.qclaw/skills/memoria"))
+def get_chroma_collection():
+    CHROMA_DB_PATH.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
+    return client.get_or_create_collection(name="memories", metadata={"hnsw:space": "cosine"})
 
 
-MEMORIA_DIR = resolve_memoria_dir()
-ARCHIVE_DIR = MEMORIA_DIR / "archive"
-MEMORIA_INDEX_FILE = MEMORIA_DIR / "memoria.json"
-
-DEFAULT_DAYS = 7
-DEFAULT_LIMIT = 5
-
-
-# ──────────────────────────────────────────────
-# 索引读取
-# ──────────────────────────────────────────────
-
-def load_index() -> dict:
-    if not MEMORIA_INDEX_FILE.exists():
-        return {"memories": [], "version": "3.0"}
+def get_embedding(text: str) -> list:
     try:
-        with open(MEMORIA_INDEX_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return {"memories": [], "version": "3.0"}
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/embeddings",
+            json={"model": EMBEDDING_MODEL, "prompt": text[:500]},
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()["embedding"]
+    except Exception as e:
+        print(f"❌ Embedding failed: {e}")
+        return None
 
 
-def parse_time(ts: str) -> datetime:
+def parse_ts(ts_str: str) -> datetime:
+    """Parse timestamp string to UTC-aware datetime."""
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except Exception:
-        return datetime.now(timezone.utc)
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        # 如果是 naive datetime，强制加 UTC
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except:
+        return datetime.min.replace(tzinfo=timezone.utc)
 
 
-def filter_memories(
-    memories: list,
-    days: int = None,
-    tags: list = None,
-    channel: str = None,
-    keyword: str = None,
-) -> list:
-    """
-    多维度筛选记忆。
-    - days: 最近 N 天
-    - tags: 标签匹配（任一即可）
-    - channel: 渠道精确匹配
-    - keyword: 关键词模糊匹配（摘要/标签/label）
-    """
-    filtered = []
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days) if days else None
-    keyword_lower = keyword.lower() if keyword else None
+def format_memory(memory_id: str, document: str, metadata: dict, distance: float = None) -> str:
+    ts = metadata.get("timestamp", "")
+    channel = metadata.get("channel", "")
+    tags = metadata.get("tags", "").split(",") if metadata.get("tags") else []
 
-    for m in memories:
-        if cutoff and parse_time(m.get("timestamp", "")) < cutoff:
-            continue
-        if tags:
-            mem_tags = [t.lower() for t in m.get("tags", [])]
-            if not any(t.lower() in mem_tags for t in tags):
-                continue
-        if channel and m.get("channel") != channel:
-            continue
-        if keyword_lower:
-            haystack = " ".join([
-                m.get("summary", ""),
-                " ".join(m.get("tags", [])),
-                m.get("session_label", ""),
-            ]).lower()
-            if keyword_lower not in haystack:
-                continue
-        filtered.append(m)
-    return filtered
+    try:
+        time_str = parse_ts(ts).strftime("%m-%d %H:%M")
+    except:
+        time_str = "unknown"
+
+    output = f"[{memory_id[:8]}...] {time_str} | {channel}"
+    if tags:
+        output += f" | {', '.join(tags)}"
+    if distance is not None:
+        # cosine distance: 0=完全相同, 1=正交, 2=完全相反
+        # 转换为相似度百分比
+        similarity = max(0, (1 - distance)) * 100
+        output += f" | {similarity:.1f}%"
+    output += f"\n  {document[:100]}\n"
+    return output
 
 
-# ──────────────────────────────────────────────
-# 格式化输出
-# ──────────────────────────────────────────────
+def load_combined_memories(days: int = 7, recent_limit: int = 3, important_limit: int = 2) -> list:
+    collection = get_chroma_collection()
 
-def format_index_entry(memory: dict, index: int = 1) -> str:
-    ts = parse_time(memory.get("timestamp", ""))
-    time_str = ts.astimezone().strftime("%Y-%m-%d %H:%M")
-    channel = memory.get("channel", "unknown")
-    tags = ", ".join(memory.get("tags", [])) or "无标签"
-    msg_count = memory.get("message_count", 0)
-    storage = memory.get("storage_type", "hot")
-    storage_icon = "🧊" if storage == "cold" else ("❄️" if storage == "cold+hot" else "🔥")
-    session_id = memory.get("session_id", "")[:8]
-    summary = memory.get("summary", "")
-
-    lines = [
-        f"{index}. [{time_str}] [{channel}] {storage_icon} [{tags}]",
-        f"   {summary}",
-        f"   🔑 id:{memory.get('id', '')[:8]}  session:{session_id}  {msg_count}条消息",
-    ]
-    return "\n".join(lines)
-
-
-def format_simple(memory: dict) -> str:
-    """简化格式，用于注入上下文"""
-    ts = parse_time(memory.get("timestamp", ""))
-    time_str = ts.astimezone().strftime("%m-%d %H:%M")
-    channel = memory.get("channel", "unknown")
-    tags = ", ".join(memory.get("tags", [])) or "无"
-    summary = memory.get("summary", "")
-    return f"[{time_str}][{channel}][{tags}] {summary}"
-
-
-# ──────────────────────────────────────────────
-# 全量展开
-# ──────────────────────────────────────────────
-
-def load_full_from_session(session_path: str) -> list:
-    """从 OpenClaw session JSONL 读取消息"""
-    messages = []
-    if not session_path or not Path(session_path).exists():
-        return messages
-    with open(session_path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if obj.get("type") != "message":
-                continue
-            msg = obj.get("message", {})
-            role = msg.get("role", "")
-            if role not in ("user", "assistant"):
-                continue
-            timestamp = obj.get("timestamp", "")
-            content = msg.get("content", [])
-            if isinstance(content, list):
-                for c in content:
-                    if isinstance(c, dict) and c.get("type") == "text":
-                        text = c.get("text", "").strip()
-                        if text:
-                            messages.append({"role": role, "text": text, "timestamp": timestamp})
-            elif isinstance(content, str) and content.strip():
-                messages.append({"role": role, "text": content.strip(), "timestamp": timestamp})
-    return messages
-
-
-def load_full_from_archive(cold_path: str) -> list:
-    """从 archive/ 读取消息"""
-    if not cold_path or not Path(cold_path).exists():
+    if collection.count() == 0:
+        print("⚠️  No memories in database")
         return []
+
+    # 统一用 UTC aware
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+    combined = {}
+
     try:
-        with open(cold_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("messages", [])
-    except (json.JSONDecodeError, IOError):
+        all_results = collection.get(limit=1000)
+
+        if all_results and all_results["ids"]:
+            for mid, doc, meta in zip(
+                all_results["ids"],
+                all_results["documents"],
+                all_results["metadatas"]
+            ):
+                ts = parse_ts(meta.get("timestamp", ""))
+                is_recent = ts >= cutoff_date
+                is_important = "重要" in meta.get("tags", "")
+
+                if is_recent or is_important:
+                    combined[mid] = {
+                        "document": doc,
+                        "metadata": meta,
+                        "type": "important" if is_important else "recent",
+                        "timestamp": ts
+                    }
+    except Exception as e:
+        print(f"⚠️  Failed to load memories: {e}")
+        return []
+
+    # 排序：最新优先
+    sorted_memories = sorted(
+        combined.items(),
+        key=lambda x: x[1]["timestamp"],
+        reverse=True
+    )
+
+    return [(mid, m["document"], m["metadata"], None)
+            for mid, m in sorted_memories[:recent_limit + important_limit]]
+
+
+def search_memories(query: str, limit: int = 5) -> list:
+    query_embedding = get_embedding(query)
+    if not query_embedding:
+        print("❌ Failed to embed query")
+        return []
+
+    collection = get_chroma_collection()
+
+    try:
+        results = collection.query(query_embeddings=[query_embedding], n_results=limit)
+
+        if not results["ids"] or not results["ids"][0]:
+            print("❌ No similar memories found")
+            return []
+
+        memories = []
+        for i, (mid, doc, distance) in enumerate(zip(
+            results["ids"][0],
+            results["documents"][0],
+            results["distances"][0]
+        )):
+            metadata = results["metadatas"][0][i]
+            memories.append((mid, doc, metadata, distance))
+
+        return memories
+
+    except Exception as e:
+        print(f"❌ Search failed: {e}")
         return []
 
 
-def recall_full(memory_id: str) -> str:
-    """根据 ID 展开完整对话"""
-    data = load_index()
-    target = None
-    for m in data["memories"]:
-        if m.get("id", "").startswith(memory_id) or m.get("id") == memory_id:
-            target = m
-            break
+def get_recent_memories(days: int = 7, limit: int = 5) -> list:
+    collection = get_chroma_collection()
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
 
-    if not target:
-        return f"❌ 未找到记忆: {memory_id}"
+    try:
+        all_results = collection.get(limit=1000)
+        if not all_results["ids"]:
+            return []
 
-    storage = target.get("storage_type", "hot")
-    cold_path = target.get("cold_path", "")
-    session_path = target.get("session_path", "")
+        memories = []
+        for mid, doc, meta in zip(
+            all_results["ids"],
+            all_results["documents"],
+            all_results["metadatas"]
+        ):
+            ts = parse_ts(meta.get("timestamp", ""))
+            if ts >= cutoff_date:
+                memories.append((mid, doc, meta, None))
 
-    # 选择读取来源
-    messages = []
-    source_desc = ""
-    if storage in ("cold", "cold+hot") and cold_path and Path(cold_path).exists():
-        messages = load_full_from_archive(cold_path)
-        source_desc = f"🧊 冷存储: {cold_path}"
-    if not messages and session_path and Path(session_path).exists():
-        messages = load_full_from_session(session_path)
-        source_desc = f"🔥 热存储: {session_path}"
+        memories.sort(key=lambda x: parse_ts(x[2].get("timestamp", "")), reverse=True)
+        return memories[:limit]
 
-    if not messages:
-        return f"❌ 无法读取完整对话（session 可能已被清理）\n摘要：{target.get('summary', '')}"
-
-    ts = parse_time(target.get("timestamp", ""))
-    time_str = ts.astimezone().strftime("%Y-%m-%d %H:%M")
-    lines = [
-        f"=== 完整对话 ===",
-        f"时间: {time_str}",
-        f"渠道: {target.get('channel', '')}",
-        f"标签: {', '.join(target.get('tags', [])) or '无'}",
-        f"描述: {target.get('session_label', '')}",
-        f"存储: {storage}",
-        f"{source_desc}",
-        f"消息数: {len(messages)}",
-        f"精华: {target.get('summary', '')}",
-        "",
-    ]
-
-    for m in messages:
-        role = "👤 用户" if m["role"] == "user" else "🤖 助手"
-        ts_str = parse_time(m.get("timestamp", "")).astimezone().strftime("%H:%M") if m.get("timestamp") else ""
-        text = m.get("text", "")
-        lines.append(f"[{ts_str}] {role}:")
-        lines.append(f"  {text[:800]}{'...' if len(text) > 800 else ''}")
-        lines.append("")
-
-    return "\n".join(lines)
+    except Exception as e:
+        print(f"❌ Failed to get recent memories: {e}")
+        return []
 
 
-# ──────────────────────────────────────────────
-# 检索入口
-# ──────────────────────────────────────────────
+def get_important_memories(limit: int = 5) -> list:
+    collection = get_chroma_collection()
 
-def recall_index(
-    days: int = DEFAULT_DAYS,
-    limit: int = DEFAULT_LIMIT,
-    tags: list = None,
-    channel: str = None,
-    keyword: str = None,
-    simple: bool = False,
-) -> str:
-    """检索索引摘要"""
-    data = load_index()
-    memories = filter_memories(data.get("memories", []), days=days, tags=tags, channel=channel, keyword=keyword)
-    memories = memories[:limit]
+    try:
+        results = collection.get(limit=1000)
+        if not results["ids"]:
+            return []
 
+        memories = [
+            (mid, doc, meta, None)
+            for mid, doc, meta in zip(results["ids"], results["documents"], results["metadatas"])
+            if "重要" in meta.get("tags", "")
+        ]
+
+        if not memories:
+            print("⚠️  No important memories found")
+
+        return memories[:limit]
+
+    except Exception as e:
+        print(f"❌ Failed to get important memories: {e}")
+        return []
+
+
+def print_memories(memories: list, title: str = ""):
     if not memories:
-        return "📭 没有找到符合条件的记忆"
+        return
+    if title:
+        print(f"\n{title}\n")
+    for mid, doc, meta, distance in memories:
+        print(format_memory(mid, doc, meta, distance))
 
-    if simple:
-        lines = [format_simple(m) for m in memories]
-        return "\n".join(lines)
-
-    lines = [f"📮 最近 {len(memories)} 条记忆（{days} 天内）:\n"]
-    for i, m in enumerate(memories, 1):
-        lines.append(format_index_entry(m, index=i))
-        lines.append("")
-    return "\n".join(lines).strip()
-
-
-# ──────────────────────────────────────────────
-# CLI 入口
-# ──────────────────────────────────────────────
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="Memoria — 检索记忆")
-    parser.add_argument("--days", type=int, default=DEFAULT_DAYS, help="最近 N 天")
-    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="最多返回 N 条")
-    parser.add_argument("--tags", default=None, help="按标签筛选（逗号分隔）")
-    parser.add_argument("--channel", default=None, help="按渠道筛选")
-    parser.add_argument("--keyword", default=None, help="关键词模糊搜索")
-    parser.add_argument("--id", default=None, help="指定记忆 ID 展开全量")
-    parser.add_argument("--full", action="store_true", help="展开完整对话")
-    parser.add_argument("--simple", action="store_true", help="简化格式（用于注入上下文）")
+    parser = argparse.ArgumentParser(description="Recall memories from ChromaDB")
+    parser.add_argument("--combined", action="store_true")
+    parser.add_argument("--search", type=str)
+    parser.add_argument("--recent", action="store_true")
+    parser.add_argument("--important", action="store_true")
+    parser.add_argument("--days", type=int, default=7)
+    parser.add_argument("--limit", type=int, default=5)
+    parser.add_argument("--simple", action="store_true")
 
     args = parser.parse_args()
 
-    if args.id:
-        print(recall_full(memory_id=args.id))
+    if not any([args.combined, args.search, args.recent, args.important]):
+        args.combined = True
+
+    memories = []
+    title = ""
+
+    if args.combined:
+        memories = load_combined_memories(days=args.days, recent_limit=3, important_limit=2)
+        title = "📚 Combined Memories (Recent + Important)"
+    elif args.search:
+        memories = search_memories(args.search, limit=args.limit)
+        title = f"🔍 Search: '{args.search}'"
+    elif args.recent:
+        memories = get_recent_memories(days=args.days, limit=args.limit)
+        title = f"📅 Recent ({args.days} days)"
+    elif args.important:
+        memories = get_important_memories(limit=args.limit)
+        title = "⭐ Important"
+
+    if args.simple:
+        for i, (mid, doc, meta, distance) in enumerate(memories, 1):
+            tags = meta.get("tags", "")
+            print(f"[{meta.get('timestamp', '')[:10]}][{meta.get('channel', '')}][{tags}] {doc[:80]}")
     else:
-        tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
-        print(recall_index(
-            days=args.days,
-            limit=args.limit,
-            tags=tags,
-            channel=args.channel,
-            keyword=args.keyword,
-            simple=args.simple,
-        ))
+        print_memories(memories, title)
 
 
 if __name__ == "__main__":
