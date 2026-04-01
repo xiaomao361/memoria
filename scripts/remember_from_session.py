@@ -12,47 +12,20 @@ import json
 import sys
 import argparse
 import uuid
-import requests
-from pathlib import Path
 from datetime import datetime, timezone
 
-try:
-    import chromadb
-except ImportError:
-    print("❌ ChromaDB not installed")
-    sys.exit(1)
-
-# Paths
-SESSIONS_DIR = Path.home() / ".qclaw/agents/main/sessions"
-CHROMA_DB_PATH = Path.home() / ".qclaw/memoria/chroma_db"
-ARCHIVE_DIR = Path.home() / ".qclaw/skills/memoria/archive"
-
-# Ollama config
-OLLAMA_BASE_URL = "http://localhost:11434"
-SUMMARY_MODEL = "qwen2.5:3b-instruct-q4_K_M"
-EMBEDDING_MODEL = "bge-m3"
-
-
-def get_chroma_collection():
-    """Get ChromaDB collection."""
-    CHROMA_DB_PATH.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
-    return client.get_or_create_collection(name="memories", metadata={"hnsw:space": "cosine"})
-
-
-def get_embedding(text: str) -> list:
-    """Get embedding from Ollama."""
-    try:
-        response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/embeddings",
-            json={"model": EMBEDDING_MODEL, "prompt": text},
-            timeout=30
-        )
-        response.raise_for_status()
-        return response.json()["embedding"]
-    except Exception as e:
-        print(f"❌ Embedding failed: {e}")
-        return None
+# 导入共用工具库
+from memoria_utils import (
+    get_chroma_collection,
+    get_embedding,
+    generate_summary_from_messages,
+    is_valid_summary,
+    get_session_start_time,
+    extract_conversation_text,
+    detect_channel_from_messages,
+    SESSIONS_DIR,
+    ARCHIVE_DIR,
+)
 
 
 def load_session(session_id: str) -> list:
@@ -79,82 +52,6 @@ def load_session(session_id: str) -> list:
         print(f"❌ Failed to load session: {e}")
     
     return messages
-
-
-def extract_conversation_text(messages: list, limit: int = 20) -> str:
-    """Extract conversation text from messages."""
-    texts = []
-    
-    for msg in messages:
-        message_data = msg.get("message", {})
-        role = message_data.get("role", "")
-        content = message_data.get("content", [])
-        
-        if role not in ("user", "assistant"):
-            continue
-        
-        text = ""
-        if isinstance(content, list):
-            for c in content:
-                if isinstance(c, dict) and c.get("type") == "text":
-                    text = c.get("text", "").strip()
-                    break
-        elif isinstance(content, str):
-            text = content.strip()
-        
-        if text and "Sender (untrusted metadata)" not in text:
-            texts.append(f"{role.upper()}: {text[:200]}")
-            if len(texts) >= limit * 2:
-                break
-    
-    return "\n".join(texts[:limit])
-
-
-def generate_summary(conversation_text: str) -> str:
-    """Generate summary using qwen2.5:7b."""
-    if not conversation_text.strip():
-        return "对话记录"
-    
-    prompt = f"""你是一个记忆整理助手。
-以下是一段对话，请用一句话总结核心内容（15-30字以内，不要超过30字）：
-
-{conversation_text}
-
-摘要："""
-    
-    try:
-        response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
-            json={
-                "model": SUMMARY_MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "temperature": 0.3,
-            },
-            timeout=60
-        )
-        response.raise_for_status()
-        result = response.json()
-        summary = result.get("response", "").strip()
-        
-        if summary:
-            summary = summary.split("\n")[0].strip()
-            if len(summary) > 50:
-                summary = summary[:50]
-            return summary
-    except Exception as e:
-        print(f"⚠️  Summary generation failed: {e}")
-    
-    return "对话记录"
-
-
-def detect_channel(messages: list) -> str:
-    """Detect channel from messages."""
-    for msg in messages:
-        if msg.get("type") == "message":
-            # Try to infer from content
-            return "webchat"  # Default
-    return "webchat"
 
 
 def archive_session(session_id: str, messages: list, summary: str, channel: str) -> str:
@@ -223,9 +120,15 @@ def write_to_chromadb(
     summary: str,
     tags: list,
     channel: str,
-    archive_path: str = ""
+    archive_path: str = "",
+    messages: list = None
 ) -> str:
     """Write memory to ChromaDB."""
+    
+    # P0-3: 摘要质量校验
+    if not is_valid_summary(summary):
+        print(f"❌ 摘要质量不足: {summary[:30]}")
+        return ""
     
     # Get embedding
     embedding = get_embedding(summary)
@@ -233,9 +136,14 @@ def write_to_chromadb(
         print("❌ Failed to get embedding")
         return ""
     
+    # P0-1: 从消息中提取对话实际时间
+    if messages:
+        timestamp = get_session_start_time(messages)
+    else:
+        timestamp = datetime.now(timezone.utc).isoformat()
+    
     # Create memory entry
     memory_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
     
     collection = get_chroma_collection()
     
@@ -245,7 +153,7 @@ def write_to_chromadb(
             embeddings=[embedding],
             documents=[summary],
             metadatas=[{
-                "timestamp": now,
+                "timestamp": timestamp,
                 "channel": channel,
                 "tags": ",".join(tags),
                 "session_id": session_id,
@@ -281,7 +189,7 @@ def main():
     print(f"   Found {len(messages)} messages")
     
     # Detect channel
-    channel = detect_channel(messages)
+    channel = detect_channel_from_messages(messages)
     
     # Generate or use provided summary
     if args.summary:
@@ -290,6 +198,7 @@ def main():
     else:
         print("🤖 Generating summary...")
         conversation_text = extract_conversation_text(messages)
+        from memoria_utils import generate_summary
         summary = generate_summary(conversation_text)
         print(f"   Summary: {summary}")
     
@@ -311,7 +220,8 @@ def main():
         summary=summary,
         tags=tags,
         channel=channel,
-        archive_path=archive_path
+        archive_path=archive_path,
+        messages=messages
     )
     
     if memory_id:

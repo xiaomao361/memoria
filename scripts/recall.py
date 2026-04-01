@@ -1,7 +1,9 @@
 #!/usr/local/bin/python3.12
 """
-Recall memories from ChromaDB with semantic search.
-Replaces memoria.json-based lookup with direct ChromaDB queries.
+Recall memories from three-layer storage:
+  1. memoria.json（热缓存，最近 N 条，快速访问）
+  2. ChromaDB（向量索引，语义搜索）
+  3. archive/ + sessions/（冷备份，全量历史）
 
 Usage:
     python3 recall.py --combined --simple              # Load combined memories (default)
@@ -9,51 +11,26 @@ Usage:
     python3 recall.py --search "query" --limit 10      # Search with limit
     python3 recall.py --recent --days 7 --limit 5      # Recent memories
     python3 recall.py --important --limit 3            # Important memories only
+    python3 recall.py --hot-cache                      # Only check hot cache (fastest)
 """
 
 import sys
 import argparse
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
-import requests
 
-try:
-    import chromadb
-except ImportError:
-    print("❌ ChromaDB not installed. Run: pip3 install chromadb")
-    sys.exit(1)
-
-# Paths
-CHROMA_DB_PATH = Path.home() / ".qclaw/memoria/chroma_db"
-OLLAMA_BASE_URL = "http://localhost:11434"
-EMBEDDING_MODEL = "bge-m3"
-
-
-def get_chroma_collection():
-    CHROMA_DB_PATH.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
-    return client.get_or_create_collection(name="memories", metadata={"hnsw:space": "cosine"})
-
-
-def get_embedding(text: str) -> list:
-    try:
-        response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/embeddings",
-            json={"model": EMBEDDING_MODEL, "prompt": text[:500]},
-            timeout=30
-        )
-        response.raise_for_status()
-        return response.json()["embedding"]
-    except Exception as e:
-        print(f"❌ Embedding failed: {e}")
-        return None
+# 导入共用工具库
+from memoria_utils import (
+    get_chroma_collection,
+    get_embedding,
+    load_hot_cache,
+    CHROMA_DB_PATH,
+)
 
 
 def parse_ts(ts_str: str) -> datetime:
     """Parse timestamp string to UTC-aware datetime."""
     try:
         dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-        # 如果是 naive datetime，强制加 UTC
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
@@ -64,7 +41,9 @@ def parse_ts(ts_str: str) -> datetime:
 def format_memory(memory_id: str, document: str, metadata: dict, distance: float = None) -> str:
     ts = metadata.get("timestamp", "")
     channel = metadata.get("channel", "")
-    tags = metadata.get("tags", "").split(",") if metadata.get("tags") else []
+    tags = metadata.get("tags", "")
+    if isinstance(tags, list):
+        tags = ",".join(tags)
 
     try:
         time_str = parse_ts(ts).strftime("%m-%d %H:%M")
@@ -73,10 +52,8 @@ def format_memory(memory_id: str, document: str, metadata: dict, distance: float
 
     output = f"[{memory_id[:8]}...] {time_str} | {channel}"
     if tags:
-        output += f" | {', '.join(tags)}"
+        output += f" | {tags}"
     if distance is not None:
-        # cosine distance: 0=完全相同, 1=正交, 2=完全相反
-        # 转换为相似度百分比
         similarity = max(0, (1 - distance)) * 100
         output += f" | {similarity:.1f}%"
     output += f"\n  {document[:100]}\n"
@@ -84,13 +61,36 @@ def format_memory(memory_id: str, document: str, metadata: dict, distance: float
 
 
 def load_combined_memories(days: int = 7, recent_limit: int = 10, important_limit: int = 5) -> list:
+    """加载组合记忆：优先热缓存，fallback 到 ChromaDB"""
+    
+    # 1. 尝试从热缓存加载
+    hot_memories = load_hot_cache()
+    
+    if hot_memories:
+        # 过滤最近 N 天
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+        recent_memories = []
+        
+        for mid, doc, meta, _ in hot_memories:
+            ts = parse_ts(meta.get("timestamp", ""))
+            is_recent = ts >= cutoff_date
+            is_important = "重要" in meta.get("tags", [])
+            
+            if is_recent or is_important:
+                recent_memories.append((mid, doc, meta, None))
+        
+        if recent_memories:
+            print(f"⚡ 从热缓存加载 {len(recent_memories)} 条记忆")
+            return recent_memories[:recent_limit + important_limit]
+    
+    # 2. Fallback 到 ChromaDB
+    print(f"📂 热缓存为空，从 ChromaDB 加载...")
     collection = get_chroma_collection()
 
     if collection.count() == 0:
         print("⚠️  No memories in database")
         return []
 
-    # 统一用 UTC aware
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
     combined = {}
 
@@ -118,7 +118,6 @@ def load_combined_memories(days: int = 7, recent_limit: int = 10, important_limi
         print(f"⚠️  Failed to load memories: {e}")
         return []
 
-    # 排序：最新优先
     sorted_memories = sorted(
         combined.items(),
         key=lambda x: x[1]["timestamp"],
@@ -221,24 +220,28 @@ def print_memories(memories: list, title: str = ""):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Recall memories from ChromaDB")
+    parser = argparse.ArgumentParser(description="Recall memories from three-layer storage")
     parser.add_argument("--combined", action="store_true")
     parser.add_argument("--search", type=str)
     parser.add_argument("--recent", action="store_true")
     parser.add_argument("--important", action="store_true")
+    parser.add_argument("--hot-cache", action="store_true", help="Only check hot cache (fastest)")
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--simple", action="store_true")
 
     args = parser.parse_args()
 
-    if not any([args.combined, args.search, args.recent, args.important]):
+    if not any([args.combined, args.search, args.recent, args.important, args.hot_cache]):
         args.combined = True
 
     memories = []
     title = ""
 
-    if args.combined:
+    if args.hot_cache:
+        memories = load_hot_cache()
+        title = "⚡ Hot Cache (memoria.json)"
+    elif args.combined:
         memories = load_combined_memories(days=args.days, recent_limit=10, important_limit=5)
         title = "📚 Combined Memories (Recent + Important)"
     elif args.search:
@@ -254,6 +257,8 @@ def main():
     if args.simple:
         for i, (mid, doc, meta, distance) in enumerate(memories, 1):
             tags = meta.get("tags", "")
+            if isinstance(tags, list):
+                tags = ",".join(tags)
             print(f"[{meta.get('timestamp', '')[:10]}][{meta.get('channel', '')}][{tags}] {doc[:80]}")
     else:
         print_memories(memories, title)

@@ -17,195 +17,34 @@ import json
 import sys
 import argparse
 import hashlib
-import uuid
 from pathlib import Path
 from datetime import datetime, timezone
-import requests
 
-try:
-    import chromadb
-except ImportError:
-    print("❌ ChromaDB not installed. Run: pip3 install chromadb")
-    sys.exit(1)
+# 导入共用工具库
+from memoria_utils import (
+    get_chroma_collection,
+    get_embedding,
+    generate_summary_from_messages,
+    is_valid_summary,
+    get_session_start_time,
+    extract_messages_from_jsonl,
+    infer_tags,
+    infer_channel,
+    SESSIONS_DIR,
+    ARCHIVE_DIR,
+    CHROMA_DB_PATH,
+)
 
-# Paths
-SESSIONS_DIR = Path.home() / ".qclaw/agents/main/sessions"
-ARCHIVE_DIR = Path.home() / ".qclaw/skills/memoria/archive"
-CHROMA_DB_PATH = Path.home() / ".qclaw/memoria/chroma_db"
-VECTORIZE_STATE = Path.home() / ".qclaw/memoria/vectorize_state.json"
-
-# Ollama config
-OLLAMA_BASE_URL = "http://localhost:11434"
-EMBEDDING_MODEL = "bge-m3"
-SUMMARY_MODEL = "qwen2.5:3b-instruct-q4_K_M"
-
-
-def get_embedding(text: str) -> list:
-    """Get embedding from Ollama."""
-    text = text[:500].strip()
-    if not text:
-        return None
-    try:
-        response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/embeddings",
-            json={"model": EMBEDDING_MODEL, "prompt": text},
-            timeout=30
-        )
-        response.raise_for_status()
-        return response.json()["embedding"]
-    except Exception as e:
-        print(f"❌ Embedding failed: {e}")
-        return None
-
-
-def generate_summary(messages: list) -> str:
-    """Generate summary using qwen2.5:7b."""
-    if not messages:
-        return ""
-    
-    # 取前 15 条
-    texts = []
-    for m in messages[:15]:
-        role = m.get("role", "")
-        text = m.get("text", m.get("content", ""))
-        if text and "Sender (untrusted metadata)" not in text:
-            prefix = "👤" if role == "user" else "🤖"
-            texts.append(f"{prefix} {text[:200]}")
-    
-    if not texts:
-        return ""
-    
-    conversation = "\n".join(texts[:10])
-    prompt = f"""你是一个记忆整理助手。
-以下是一段对话，请用一句话总结核心内容（20-50字，不要超过50字）：
-
-{conversation}
-
-摘要："""
-
-    try:
-        response = requests.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
-            json={"model": SUMMARY_MODEL, "prompt": prompt, "stream": False, "temperature": 0.3},
-            timeout=60
-        )
-        response.raise_for_status()
-        summary = response.json().get("response", "").strip()
-        if summary:
-            return summary.split("\n")[0].strip()[:80]
-    except Exception as e:
-        print(f"⚠️  Summary failed: {e}")
-    
-    # Fallback: 取第一条有效用户消息（过滤系统元数据）
-    SKIP_PATTERNS = ["Sender (untrusted metadata)", "openclaw-control", "HEARTBEAT", "system_event"]
-    for m in messages:
-        if m.get("role") == "user":
-            text = m.get("text", m.get("content", ""))
-            if any(p in text for p in SKIP_PATTERNS):
-                continue
-            text = text[:60]
-            return text + "..." if len(text) == 60 else text
-    return ""
-
-
-def extract_messages_from_jsonl(path: Path) -> list:
-    """Extract messages from session JSONL."""
-    messages = []
-    if not path.exists():
-        return messages
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except:
-                    continue
-                if obj.get("type") != "message":
-                    continue
-                msg = obj.get("message", {})
-                role = msg.get("role", "")
-                if role not in ("user", "assistant"):
-                    continue
-                timestamp = obj.get("timestamp", "")
-                content = msg.get("content", [])
-                text = ""
-                if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and c.get("type") == "text":
-                            text = c.get("text", "").strip()
-                            break
-                elif isinstance(content, str):
-                    text = content.strip()
-                if text:
-                    messages.append({"role": role, "text": text, "timestamp": timestamp})
-    except Exception as e:
-        print(f"⚠️  Failed to read {path.name}: {e}")
-    return messages
-
-
-def extract_messages_from_archive(path: Path) -> list:
-    """Extract messages from archive JSON."""
-    try:
-        d = json.load(open(path, 'r', encoding='utf-8'))
-        return d.get("messages", [])
-    except Exception as e:
-        print(f"⚠️  Failed to read archive {path.name}: {e}")
-        return []
-
-
-def infer_tags(messages: list) -> list:
-    """Infer tags from message content."""
-    all_text = " ".join((m.get("text", m.get("content", "")).lower() for m in messages))
-    tags = []
-    tag_map = {
-        "memoria": ["memoria", "记忆系统"],
-        "织影": ["织影", "aelovia", "weave"],
-        "副业": ["副业", "兼职", "收入"],
-        "埃洛维亚": ["埃洛维亚", "世界观"],
-        "技术": ["python", "linux", "服务器", "架构", "运维"],
-        "日常": ["日常", "聊天"],
-        "日程": ["日历", "日程", "提醒", "cron", "日报"],
-        "ThreadVibe": ["threadvibe", "websocket"],
-    }
-    for tag, keywords in tag_map.items():
-        if any(kw in all_text for kw in keywords):
-            tags.append(tag)
-    return tags or ["未分类"]
-
-
-def infer_channel(path: Path, messages: list) -> str:
-    """Infer channel from path or content."""
-    filename = path.name.lower()
-    if "feishu" in filename:
-        return "feishu"
-    if "wechat" in filename:
-        return "wechat"
-    # Check first user message
-    for m in messages:
-        if m.get("role") == "user":
-            text = m.get("text", m.get("content", "")).lower()
-            if "feishu" in text or "飞书" in text:
-                return "feishu"
-            if "wechat" in text or "微信" in text:
-                return "wechat"
-            break
-    return "webchat"
-
-
-def get_chroma_collection():
-    """Get ChromaDB collection."""
-    CHROMA_DB_PATH.mkdir(parents=True, exist_ok=True)
-    client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
-    return client.get_or_create_collection(name="memories", metadata={"hnsw:space": "cosine"})
+VECTORIZE_STATE = CHROMA_DB_PATH.parent / "vectorize_state.json"
 
 
 def load_vectorize_state() -> dict:
     if VECTORIZE_STATE.exists():
-        with open(VECTORIZE_STATE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(VECTORIZE_STATE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            pass
     return {"vectorized": {}}
 
 
@@ -237,7 +76,7 @@ def vectorize_from_sessions(incremental: bool = True):
         if incremental and session_id in vectorized:
             file_hash = get_session_hash(f)
             if vectorized[session_id].get("hash") == file_hash:
-                continue  # 未变化，跳过
+                continue
         to_process.append(f)
 
     if not to_process:
@@ -257,9 +96,14 @@ def vectorize_from_sessions(incremental: bool = True):
             continue
         
         # 生成摘要
-        summary = generate_summary(messages)
+        summary = generate_summary_from_messages(messages)
         if not summary:
             print("⚠️  无摘要")
+            continue
+        
+        # P0-3: 摘要质量校验
+        if not is_valid_summary(summary):
+            print(f"⚠️  摘要质量不足，跳过: {summary[:30]}")
             continue
         
         # 向量化
@@ -269,6 +113,9 @@ def vectorize_from_sessions(incremental: bool = True):
             print("❌ 向量化失败")
             continue
         
+        # P0-1: 从消息中提取对话实际时间
+        session_timestamp = get_session_start_time(messages)
+        
         # 存入 ChromaDB
         try:
             collection.upsert(
@@ -276,7 +123,7 @@ def vectorize_from_sessions(incremental: bool = True):
                 embeddings=[embedding],
                 documents=[summary],
                 metadatas=[{
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": session_timestamp,
                     "channel": infer_channel(f, messages),
                     "tags": ",".join(infer_tags(messages)),
                     "session_id": session_id,
@@ -313,7 +160,6 @@ def vectorize_from_archive():
 
     to_process = []
     for f in archive_files:
-        # 从文件名提取 session_id
         session_id = f.stem.split("_")[-1]
         if session_id in vectorized:
             continue
@@ -327,28 +173,25 @@ def vectorize_from_archive():
     success_count = 0
 
     for i, f in enumerate(to_process, 1):
-        # 从文件名提取 session_id
         session_id = f.stem.split("_")[-1]
         print(f"  [{i}/{len(to_process)}] {session_id[:8]}...", end=" ")
         
-        messages = extract_messages_from_archive(f)
+        try:
+            d = json.load(open(f, 'r', encoding='utf-8'))
+            messages = d.get("messages", [])
+            archived_at = d.get("archived_at", "")
+            channel = d.get("channel", "webchat")
+            session_label = d.get("session_label", "")[:50]
+        except Exception as e:
+            print(f"⚠️  读取失败: {e}")
+            continue
+        
         if not messages:
             print("⚠️  无消息")
             continue
         
-        # 从归档读取元数据
-        try:
-            d = json.load(open(f, 'r', encoding='utf-8'))
-            archived_at = d.get("archived_at", "")
-            channel = d.get("channel", infer_channel(f, messages))
-            session_label = d.get("session_label", "")[:50]
-        except:
-            archived_at = ""
-            channel = infer_channel(f, messages)
-            session_label = ""
-        
         # 生成摘要
-        summary = generate_summary(messages)
+        summary = generate_summary_from_messages(messages)
         if not summary:
             summary = f"历史归档: {session_label}" if session_label else "历史归档对话"
         
