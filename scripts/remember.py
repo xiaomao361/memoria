@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/local/bin/python3.12
 """
 Memoria remember.py — 写入记忆
 

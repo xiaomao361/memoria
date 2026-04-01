@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/local/bin/python3.12
 """
 Recall memories from ChromaDB with semantic search.
 Replaces memoria.json-based lookup with direct ChromaDB queries.

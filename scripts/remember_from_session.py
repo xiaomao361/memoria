@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/local/bin/python3.12
 """
 Remember from current session — 用户说"记下来"时触发
 提取当前 session 对话，生成摘要，直接写入 ChromaDB

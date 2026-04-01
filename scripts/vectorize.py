@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/local/bin/python3.12
 """
 Vectorize memories directly from sessions/archive to ChromaDB.
 No intermediate memoria.json needed.
@@ -96,10 +96,14 @@ def generate_summary(messages: list) -> str:
     except Exception as e:
         print(f"⚠️  Summary failed: {e}")
     
-    # Fallback: 取第一条用户消息
+    # Fallback: 取第一条有效用户消息（过滤系统元数据）
+    SKIP_PATTERNS = ["Sender (untrusted metadata)", "openclaw-control", "HEARTBEAT", "system_event"]
     for m in messages:
         if m.get("role") == "user":
-            text = m.get("text", m.get("content", ""))[:60]
+            text = m.get("text", m.get("content", ""))
+            if any(p in text for p in SKIP_PATTERNS):
+                continue
+            text = text[:60]
             return text + "..." if len(text) == 60 else text
     return ""
 
