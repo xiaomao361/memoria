@@ -29,7 +29,7 @@ ARCHIVE_DIR = Path.home() / ".qclaw/skills/memoria/archive"
 
 # Ollama config
 OLLAMA_BASE_URL = "http://localhost:11434"
-SUMMARY_MODEL = "qwen2.5:7b"
+SUMMARY_MODEL = "qwen2.5:3b-instruct-q4_K_M"
 EMBEDDING_MODEL = "bge-m3"
 
 

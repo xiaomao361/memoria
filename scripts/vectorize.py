@@ -37,7 +37,7 @@ VECTORIZE_STATE = Path.home() / ".qclaw/memoria/vectorize_state.json"
 # Ollama config
 OLLAMA_BASE_URL = "http://localhost:11434"
 EMBEDDING_MODEL = "bge-m3"
-SUMMARY_MODEL = "qwen2.5:7b"
+SUMMARY_MODEL = "qwen2.5:3b-instruct-q4_K_M"
 
 
 def get_embedding(text: str) -> list:

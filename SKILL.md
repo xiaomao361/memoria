@@ -93,7 +93,7 @@ python3 ~/.qclaw/skills/memoria/scripts/auto_archive.py
 
 - **Ollama**（本地 LLM）
   - `bge-m3` — 向量化模型
-  - `qwen2.5:7b` — 摘要生成模型
+  - `qwen2.5:3b-instruct-q4_K_M` — 摘要生成模型（轻量，快速）
 - **ChromaDB** — 向量数据库
 
 ---
@@ -119,10 +119,6 @@ python3 scripts/auto_archive.py
 | `auto_archive.py` | 每日归档 + 自动向量化 | ✅ 活跃 |
 | `remember.py` | 手动记录 | ✅ 活跃 |
 | `remember_from_session.py` | 从 session 记录 | ✅ 活跃 |
-| `batch_index.py` | 批量索引 | ⚠️ 旧版，可废弃 |
-| `auto_update.py` | 旧版自动更新 | ⚠️ 旧版，可废弃 |
-| `integrate_with_claw.py` | 旧版集成脚本 | ⚠️ 旧版，可废弃 |
-| `export_training_data.py` | 导出训练数据 | 📦 按需使用 |
 
 ---
 
