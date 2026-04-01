@@ -372,7 +372,7 @@ def main():
         import subprocess
         try:
             result = subprocess.run(
-                ["python3", str(Path(__file__).parent / "vectorize.py"), "--incremental"],
+                ["python3", str(Path(__file__).parent / "vectorize.py")],
                 capture_output=True,
                 text=True,
                 timeout=300
