@@ -1,0 +1,121 @@
+# Memoria
+
+Clara 的跨会话记忆系统。基于本地 LLM + ChromaDB 向量检索，让每次对话都能记住上次聊了什么。
+
+---
+
+## 架构
+
+```
+sessions/*.jsonl
+      ↓
+auto_archive.py（每晚 23:30）
+      ↓
+┌─────────────────────────────────────┐
+│ memoria.json   热缓存，最近 50 条    │  ← 新会话默认加载
+│ ChromaDB       向量索引，语义搜索    │  ← recall --search
+│ archive/       冷备份，全量历史      │  ← 永久保留
+└─────────────────────────────────────┘
+      ↓
+recall.py（检索入口）
+```
+
+三层存储各司其职：热缓存快、向量库准、冷备份全。
+
+---
+
+## 快速开始
+
+```bash
+# 新会话启动时加载记忆
+python3 scripts/recall.py --hot-cache --simple
+
+# 搜索特定话题
+python3 scripts/recall.py --search "kraken 项目"
+
+# 查看最近 7 天
+python3 scripts/recall.py --recent --days 7
+```
+
+---
+
+## 自动化
+
+每晚 23:30 自动归档（OpenClaw cron 任务）：
+
+```bash
+python3 scripts/auto_archive.py
+```
+
+扫描当天所有 sessions → 生成摘要 → 同时写入三层存储。无需其他定时任务。
+
+---
+
+## 手动记录
+
+```bash
+# 从当前 session 记录（用户说"记下来"时触发）
+python3 scripts/remember_from_session.py --session-id <id> --tags "tag1,tag2"
+
+# 直接写入一条记忆
+python3 scripts/remember.py --summary "xxx" --tags "tag1"
+```
+
+---
+
+## 向量化
+
+通常由 `auto_archive.py` 自动触发，无需手动。特殊情况：
+
+```bash
+# 增量（只处理新增/变更的 session）
+python3 scripts/vectorize.py
+
+# 从历史归档回填（首次部署或数据迁移）
+python3 scripts/vectorize.py --from-archive
+
+# 全量重建向量库
+python3 scripts/vectorize.py --full
+```
+
+---
+
+## 依赖
+
+| 依赖 | 用途 | 安装 |
+|------|------|------|
+| Ollama | 本地 LLM | [ollama.ai](https://ollama.ai) |
+| bge-m3 | 向量化模型 | `ollama pull bge-m3` |
+| qwen2.5:7b | 摘要生成 | `ollama pull qwen2.5:7b` |
+| ChromaDB | 向量数据库 | `pip3 install chromadb` |
+
+---
+
+## 存储路径
+
+```
+~/.qclaw/skills/memoria/
+├── memoria.json          # 热缓存（最近 50 条）
+├── archive/              # 冷备份（按月归档）
+│   ├── 2026-03/
+│   └── 2026-04/
+└── scripts/              # 脚本
+
+~/.qclaw/memoria/
+└── chroma_db/            # 向量索引（ChromaDB）
+
+~/.qclaw/agents/main/sessions/
+└── *.jsonl               # 原始对话（OpenClaw 管理）
+```
+
+---
+
+## 文档
+
+- `docs/optimization/` — 织影的架构分析与优化建议（Vera / Iris / Nova）
+
+---
+
+## License
+
+MIT

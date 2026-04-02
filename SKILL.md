@@ -18,46 +18,78 @@ metadata:
 ## 架构
 
 ```
-sessions/          → 原始对话（OpenClaw 管理）
-     ↓
-auto_archive.py    → 每晚归档 + 自动触发向量化
-     ↓
-ChromaDB           → 向量存储（语义搜索）
-     ↓
+sessions/*.jsonl   → 原始对话（OpenClaw 管理）
+       ↓
+auto_archive.py    → 每晚 23:30 归档（三层同时写入）
+       ↓
+┌──────────────────────────────────────┐
+│  1. memoria.json   热缓存（最近50条）  │
+│  2. ChromaDB       向量索引（语义搜索）│
+│  3. archive/       冷备份（全量历史）  │
+└──────────────────────────────────────┘
+       ↓
 recall.py          → 检索入口
 ```
 
 **存储位置：**
-- `~/.qclaw/agents/main/sessions/` — 原始对话（热）
-- `~/.qclaw/skills/memoria/archive/` — 历史归档（冷备份）
+- `~/.qclaw/agents/main/sessions/` — 原始对话
+- `~/.qclaw/skills/memoria/memoria.json` — 热缓存
+- `~/.qclaw/skills/memoria/archive/` — 冷备份
 - `~/.qclaw/memoria/chroma_db/` — 向量索引
-
-> `auto_archive.py` 归档完成后自动调用 `vectorize.py` 增量向量化，无需单独定时任务。
 
 ---
 
-## 使用方式
+## ⚠️ 启动触发（强制）
 
-### 检索记忆
+**新会话第一条消息时，必须立即执行：**
+```bash
+python3 ~/.qclaw/skills/memoria/scripts/recall.py --hot-cache --simple
+```
+
+**用户提到"之前/上次/还记得"时，立即执行：**
+```bash
+python3 ~/.qclaw/skills/memoria/scripts/recall.py --search "关键词"
+```
+
+---
+
+## 检索
 
 ```bash
-# 组合记忆（最近7天 + 重要标记，推荐）
-python3 ~/.qclaw/skills/memoria/scripts/recall.py --combined --simple
+# 热缓存（最快，新会话默认）
+python3 ~/.qclaw/skills/memoria/scripts/recall.py --hot-cache --simple
 
 # 语义搜索
 python3 ~/.qclaw/skills/memoria/scripts/recall.py --search "关键词"
 
-# 最近记忆
+# 最近 N 天
 python3 ~/.qclaw/skills/memoria/scripts/recall.py --recent --days 7
 
 # 重要记忆
 python3 ~/.qclaw/skills/memoria/scripts/recall.py --important
+
+# 组合（热缓存优先，fallback ChromaDB）
+python3 ~/.qclaw/skills/memoria/scripts/recall.py --combined --simple
 ```
 
-### 向量化
+---
+
+## 手动记录
 
 ```bash
-# 增量向量化（通常由 auto_archive.py 自动触发）
+# 从当前 session 记录
+python3 ~/.qclaw/skills/memoria/scripts/remember_from_session.py --session-id <id>
+
+# 直接写入
+python3 ~/.qclaw/skills/memoria/scripts/remember.py --summary "xxx" --tags "tag1,tag2"
+```
+
+---
+
+## 向量化（通常自动，无需手动）
+
+```bash
+# 增量（auto_archive.py 已自动触发，一般不需要手动跑）
 python3 ~/.qclaw/skills/memoria/scripts/vectorize.py
 
 # 从历史归档回填
@@ -65,16 +97,6 @@ python3 ~/.qclaw/skills/memoria/scripts/vectorize.py --from-archive
 
 # 全量重建
 python3 ~/.qclaw/skills/memoria/scripts/vectorize.py --full
-```
-
-### 手动记录
-
-```bash
-# 从指定 session 记录
-python3 ~/.qclaw/skills/memoria/scripts/remember_from_session.py --session-id <id>
-
-# 手动写入
-python3 ~/.qclaw/skills/memoria/scripts/remember.py --summary "xxx" --tags "tag1,tag2"
 ```
 
 ---
@@ -85,43 +107,26 @@ python3 ~/.qclaw/skills/memoria/scripts/remember.py --summary "xxx" --tags "tag1
 ```bash
 python3 ~/.qclaw/skills/memoria/scripts/auto_archive.py
 ```
-归档当天 sessions → 生成摘要 → 自动触发增量向量化，一步到位。
+扫描当天 sessions → 生成摘要 → 三层同时写入（热缓存 + 向量 + 冷备份）。
 
 ---
 
 ## 依赖
 
 - **Ollama**（本地 LLM）
-  - `bge-m3` — 向量化模型
-  - `qwen2.5:3b-instruct-q4_K_M` — 摘要生成模型（轻量，快速）
-- **ChromaDB** — 向量数据库
-
----
-
-## 多 Claw 兼容
-
-每个 agent 共享同一 ChromaDB，记忆天然互通：
-
-```bash
-# Vera 独立归档（隔离 sessions）
-export MEMORIA_DIR=~/.qclaw/agents/vera/memoria
-python3 scripts/auto_archive.py
-```
+  - `bge-m3` — 向量化
+  - `qwen2.5:7b` — 摘要生成
+- **ChromaDB** — 向量数据库（`pip3 install chromadb`）
 
 ---
 
 ## 脚本说明
 
-| 脚本 | 作用 | 状态 |
-|------|------|------|
-| `recall.py` | 检索记忆（主入口） | ✅ 活跃 |
-| `vectorize.py` | 向量化（增量/全量/归档回填） | ✅ 活跃 |
-| `auto_archive.py` | 每日归档 + 自动向量化 | ✅ 活跃 |
-| `remember.py` | 手动记录 | ✅ 活跃 |
-| `remember_from_session.py` | 从 session 记录 | ✅ 活跃 |
-
----
-
-## License
-
-MIT
+| 脚本 | 作用 |
+|------|------|
+| `recall.py` | 检索入口（热缓存 / 向量搜索 / 时间过滤） |
+| `auto_archive.py` | 每日归档，三层写入 |
+| `vectorize.py` | 增量/全量向量化，archive 回填 |
+| `remember_from_session.py` | 从指定 session 手动记录 |
+| `remember.py` | 直接写入一条记忆 |
+| `memoria_utils.py` | 公共工具库（不直接调用） |
