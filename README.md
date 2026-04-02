@@ -86,7 +86,7 @@ python3 scripts/vectorize.py --full
 |------|------|------|
 | Ollama | 本地 LLM | [ollama.ai](https://ollama.ai) |
 | bge-m3 | 向量化模型 | `ollama pull bge-m3` |
-| qwen2.5:7b | 摘要生成 | `ollama pull qwen2.5:7b` |
+| qwen2.5:3b-instruct-q4_K_M | 摘要生成（轻量快速） | `ollama pull qwen2.5:3b-instruct-q4_K_M` |
 | ChromaDB | 向量数据库 | `pip3 install chromadb` |
 
 ---

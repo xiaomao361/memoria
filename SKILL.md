@@ -115,7 +115,7 @@ python3 ~/.qclaw/skills/memoria/scripts/auto_archive.py
 
 - **Ollama**（本地 LLM）
   - `bge-m3` — 向量化
-  - `qwen2.5:7b` — 摘要生成
+  - `qwen2.5:3b-instruct-q4_K_M` — 摘要生成（轻量快速，性价比高）
 - **ChromaDB** — 向量数据库（`pip3 install chromadb`）
 
 ---

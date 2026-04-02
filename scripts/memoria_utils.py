@@ -31,7 +31,7 @@ SESSIONS_DIR = Path.home() / ".qclaw/agents/main/sessions"
 # Ollama 配置
 OLLAMA_BASE_URL = "http://localhost:11434"
 EMBEDDING_MODEL = "bge-m3"
-SUMMARY_MODEL = "qwen2.5:7b"
+SUMMARY_MODEL = "qwen2.5:3b-instruct-q4_K_M"
 
 
 # ========== ChromaDB ==========
