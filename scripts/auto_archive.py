@@ -8,7 +8,7 @@ Memoria auto_archive.py — 每日自动归档
   2. ChromaDB（向量索引，语义搜索）
   3. archive/（冷备份，全量历史）
 
-使用 qwen2.5:7b 生成高质量摘要
+使用 qwen2.5:3b-instruct-q4_K_M 生成高质量摘要
 """
 
 import json
