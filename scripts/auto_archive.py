@@ -320,24 +320,7 @@ def main():
             print(f"   ✅ 新归档: {summary[:40]}...")
     
     print(f"\n📊 归档完成: 新增 {new_count} 条，跳过 {skip_count} 条（已归档）")
-    
-    # 自动触发向量化（确保向量库同步）
-    if new_count > 0:
-        print(f"\n🔄 自动向量化 {new_count} 条新记忆...")
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["python3", str(Path(__file__).parent / "vectorize.py")],
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            if result.returncode == 0:
-                print("✨ 向量化完成")
-            else:
-                print(f"⚠️  向量化失败: {result.stderr}")
-        except Exception as e:
-            print(f"⚠️  向量化异常: {e}")
+    # 注意：write_memory() 已同时写入 ChromaDB，无需再调用 vectorize.py（避免双写）
 
 
 if __name__ == "__main__":

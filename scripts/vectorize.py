@@ -200,6 +200,9 @@ def vectorize_from_archive():
         if not summary:
             summary = f"历史归档: {session_label}" if session_label else "历史归档对话"
         
+        # P0-1: 从消息中提取对话实际时间（archive 回填也用对话时间，不用 archived_at）
+        actual_ts = get_session_start_time(messages)
+        
         # 向量化
         text = f"{summary} {' '.join(infer_tags(messages))}"
         embedding = get_embedding(text)
@@ -214,7 +217,7 @@ def vectorize_from_archive():
                 embeddings=[embedding],
                 documents=[summary],
                 metadatas=[{
-                    "timestamp": archived_at or datetime.now(timezone.utc).isoformat(),
+                    "timestamp": actual_ts,
                     "channel": channel,
                     "tags": ",".join(infer_tags(messages)),
                     "session_id": session_id,

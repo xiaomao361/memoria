@@ -136,11 +136,8 @@ def write_to_chromadb(
         print("❌ Failed to get embedding")
         return ""
     
-    # P0-1: 从消息中提取对话实际时间
-    if messages:
-        timestamp = get_session_start_time(messages)
-    else:
-        timestamp = datetime.now(timezone.utc).isoformat()
+    # P0-1: 从消息中提取对话实际时间（统一返回 float Unix 时间戳）
+    timestamp = get_session_start_time(messages) if messages else datetime.now(timezone.utc).timestamp()
     
     # Create memory entry
     memory_id = str(uuid.uuid4())
