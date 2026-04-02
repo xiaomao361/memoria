@@ -25,6 +25,8 @@ from memoria_utils import (
     is_valid_summary,
     get_session_start_time,
     extract_messages_from_jsonl,
+    infer_tags,
+    infer_tags_with_llm,
     infer_channel,
     MEMORIA_DIR,
     ARCHIVE_DIR,
@@ -292,10 +294,18 @@ def main():
         if not summary:
             summary = session_label[:50] if session_label else "unknown"
         
+        # P1-3: 先用规则推断 tags，再用 LLM 补充
+        rule_tags = infer_tags(messages)
+        if rule_tags == ["未分类"]:
+            llm_tags = infer_tags_with_llm(summary)
+            tags_to_use = llm_tags
+        else:
+            tags_to_use = rule_tags
+        
         # 写入三层
         result = write_memory(
             channel=channel,
-            tags=["自动归档", "每日"],
+            tags=tags_to_use + ["自动归档"],
             session_id=session_id,
             session_path=session_path,
             session_label=session_label,

@@ -27,10 +27,13 @@ from memoria_utils import (
 )
 
 
-def parse_ts(ts_str: str) -> datetime:
-    """Parse timestamp string to UTC-aware datetime."""
+def parse_ts(ts) -> datetime:
+    """Parse timestamp (Unix float or ISO string) to UTC-aware datetime."""
     try:
-        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if isinstance(ts, (int, float)):
+            return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+        ts_str = str(ts).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts_str)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
@@ -91,31 +94,31 @@ def load_combined_memories(days: int = 7, recent_limit: int = 10, important_limi
         print("⚠️  No memories in database")
         return []
 
-    cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
     combined = {}
 
     try:
-        all_results = collection.get(limit=1000)
+        # P1-1: 使用 ChromaDB 原生 where 过滤（Unix 时间戳）
+        results = collection.get(
+            where={"timestamp": {"$gte": cutoff_ts}},
+            limit=1000
+        )
 
-        if all_results and all_results["ids"]:
+        if results and results.get("ids"):
             for mid, doc, meta in zip(
-                all_results["ids"],
-                all_results["documents"],
-                all_results["metadatas"]
+                results["ids"],
+                results["documents"],
+                results["metadatas"]
             ):
-                ts = parse_ts(meta.get("timestamp", ""))
-                is_recent = ts >= cutoff_date
                 is_important = "重要" in meta.get("tags", "")
-
-                if is_recent or is_important:
-                    combined[mid] = {
-                        "document": doc,
-                        "metadata": meta,
-                        "type": "important" if is_important else "recent",
-                        "timestamp": ts
-                    }
+                combined[mid] = {
+                    "document": doc,
+                    "metadata": meta,
+                    "type": "important" if is_important else "recent",
+                    "timestamp": parse_ts(meta.get("timestamp", 0))
+                }
     except Exception as e:
-        print(f"⚠️  Failed to load memories: {e}")
+        print(f"⚠️  ChromaDB where 过滤失败: {e}")
         return []
 
     sorted_memories = sorted(
@@ -161,24 +164,30 @@ def search_memories(query: str, limit: int = 5) -> list:
 
 def get_recent_memories(days: int = 7, limit: int = 5) -> list:
     collection = get_chroma_collection()
-    cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
 
     try:
-        all_results = collection.get(limit=1000)
-        if not all_results["ids"]:
+        # P1-1: ChromaDB 原生 where 过滤（Unix 时间戳）
+        results = collection.get(
+            where={"timestamp": {"$gte": cutoff_ts}},
+            limit=1000
+        )
+
+        if not results or not results.get("ids"):
             return []
 
         memories = []
         for mid, doc, meta in zip(
-            all_results["ids"],
-            all_results["documents"],
-            all_results["metadatas"]
+            results["ids"],
+            results["documents"],
+            results["metadatas"]
         ):
-            ts = parse_ts(meta.get("timestamp", ""))
-            if ts >= cutoff_date:
-                memories.append((mid, doc, meta, None))
+            memories.append((mid, doc, meta, None))
 
-        memories.sort(key=lambda x: parse_ts(x[2].get("timestamp", "")), reverse=True)
+        memories.sort(
+            key=lambda x: parse_ts(x[2].get("timestamp", 0)),
+            reverse=True
+        )
         return memories[:limit]
 
     except Exception as e:
@@ -259,7 +268,10 @@ def main():
             tags = meta.get("tags", "")
             if isinstance(tags, list):
                 tags = ",".join(tags)
-            print(f"[{meta.get('timestamp', '')[:10]}][{meta.get('channel', '')}][{tags}] {doc[:80]}")
+            # timestamp 可能是 float（Unix）或 str（ISO）
+            ts = meta.get("timestamp", "")
+            ts_str = parse_ts(ts).strftime("%Y-%m-%d") if ts else ""
+            print(f"[{ts_str}][{meta.get('channel', '')}][{tags}] {doc[:80]}")
     else:
         print_memories(memories, title)
 

@@ -29,6 +29,7 @@ from memoria_utils import (
     get_session_start_time,
     extract_messages_from_jsonl,
     infer_tags,
+    infer_tags_with_llm,
     infer_channel,
     SESSIONS_DIR,
     ARCHIVE_DIR,
@@ -106,8 +107,12 @@ def vectorize_from_sessions(incremental: bool = True):
             print(f"⚠️  摘要质量不足，跳过: {summary[:30]}")
             continue
         
+        # P1-3: 规则 tags 优先，未分类时用 LLM
+        rule_tags = infer_tags(messages)
+        final_tags = rule_tags if rule_tags != ["未分类"] else infer_tags_with_llm(summary)
+        
         # 向量化
-        text = f"{summary} {' '.join(infer_tags(messages))}"
+        text = f"{summary} {' '.join(final_tags)}"
         embedding = get_embedding(text)
         if not embedding:
             print("❌ 向量化失败")
@@ -125,7 +130,7 @@ def vectorize_from_sessions(incremental: bool = True):
                 metadatas=[{
                     "timestamp": session_timestamp,
                     "channel": infer_channel(f, messages),
-                    "tags": ",".join(infer_tags(messages)),
+                    "tags": ",".join(final_tags),
                     "session_id": session_id,
                     "message_count": len(messages),
                 }]
