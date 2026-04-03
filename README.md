@@ -17,7 +17,8 @@ auto_archive.py（每晚 23:30）
 │ archive/       冷备份，全量历史      │  ← 永久保留
 └─────────────────────────────────────┘
       ↓
-recall.py（检索入口）
+recall.py（快速检索，只返回摘要）
+recall_with_context.py（深度检索，自动获取原文）
 ```
 
 三层存储各司其职：热缓存快、向量库准、冷备份全。
@@ -30,8 +31,11 @@ recall.py（检索入口）
 # 新会话启动时加载记忆
 python3 scripts/recall.py --hot-cache --simple
 
-# 搜索特定话题
+# 搜索特定话题（只返回摘要）
 python3 scripts/recall.py --search "kraken 项目"
+
+# 深度搜索（自动获取 archive 原文）
+python3 scripts/recall_with_context.py --search "本地模型计划"
 
 # 查看最近 7 天
 python3 scripts/recall.py --recent --days 7
@@ -54,11 +58,11 @@ python3 scripts/auto_archive.py
 ## 手动记录
 
 ```bash
-# 从当前 session 记录（用户说"记下来"时触发）
-python3 scripts/remember_from_session.py --session-id <id> --tags "tag1,tag2"
-
-# 直接写入一条记忆
+# 记下来（写入热缓存）
 python3 scripts/remember.py --summary "xxx" --tags "tag1"
+
+# 单独记一下（写入 archive + 向量化，用于重要项目文档）
+python3 scripts/archive_important.py --project "项目名" --content "要记录的内容"
 ```
 
 ---
@@ -86,7 +90,7 @@ python3 scripts/vectorize.py --full
 |------|------|------|
 | Ollama | 本地 LLM | [ollama.ai](https://ollama.ai) |
 | bge-m3 | 向量化模型 | `ollama pull bge-m3` |
-| qwen2.5:3b-instruct-q4_K_M | 摘要生成（轻量快速） | `ollama pull qwen2.5:3b-instruct-q4_K_M` |
+| qwen2.5:3b-instruct-q4_K_M | 摘要生成 | `ollama pull qwen2.5:3b-instruct-q4_K_M` |
 | ChromaDB | 向量数据库 | `pip3 install chromadb` |
 
 ---
@@ -97,8 +101,7 @@ python3 scripts/vectorize.py --full
 ~/.qclaw/skills/memoria/
 ├── memoria.json          # 热缓存（最近 50 条）
 ├── archive/              # 冷备份（按月归档）
-│   ├── 2026-03/
-│   └── 2026-04/
+│   └── 2026-04/          # 重要内容原文
 └── scripts/              # 脚本
 
 ~/.qclaw/memoria/
@@ -107,6 +110,20 @@ python3 scripts/vectorize.py --full
 ~/.qclaw/agents/main/sessions/
 └── *.jsonl               # 原始对话（OpenClaw 管理）
 ```
+
+---
+
+## 脚本说明
+
+| 脚本 | 作用 |
+|------|------|
+| `recall.py` | 快速检索（热缓存/向量搜索） |
+| `recall_with_context.py` | 深度检索（自动获取 archive 原文） |
+| `archive_important.py` | 重要内容写入 archive + 向量化 |
+| `auto_archive.py` | 每日归档，三层写入 |
+| `vectorize.py` | 增量/全量向量化 |
+| `remember.py` | 直接写入一条记忆（热缓存） |
+| `memoria_utils.py` | 公共工具库 |
 
 ---
 

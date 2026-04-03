@@ -433,3 +433,51 @@ def load_hot_cache() -> list:
     except Exception as e:
         print(f"⚠️  Failed to load hot cache: {e}")
         return []
+
+
+# ========== Archive 原文获取 ==========
+
+def get_archive_content(memory_id: str) -> dict:
+    """
+    通过向量 ID 获取 archive 原文
+    
+    Returns:
+        {
+            "id": "xxx",
+            "archive_path": "archive/.../xxx.txt",
+            "document": "摘要",
+            "full_content": "原文",
+            "metadata": {...}
+        }
+    """
+    collection = get_chroma_collection()
+    result = collection.get(ids=[memory_id])
+    
+    if not result or not result.get("ids"):
+        return {"error": "未找到"}
+    
+    metadata = result["metadatas"][0]
+    archive_path = metadata.get("archive_path", "")
+    
+    # 读取原文
+    full_content = ""
+    if archive_path and Path(archive_path).exists():
+        try:
+            with open(archive_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                # 去掉头部元信息，只留正文
+                if "# 创建时间" in content:
+                    parts = content.split("\n\n", 2)
+                    full_content = parts[-1] if len(parts) > 1 else content
+                else:
+                    full_content = content
+        except Exception as e:
+            full_content = f"读取失败: {e}"
+    
+    return {
+        "id": memory_id,
+        "archive_path": archive_path,
+        "document": result["documents"][0] if result.get("documents") else "",
+        "full_content": full_content,
+        "metadata": metadata,
+    }
