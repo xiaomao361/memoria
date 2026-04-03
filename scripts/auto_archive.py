@@ -88,8 +88,16 @@ def get_today_sessions() -> list:
     return sorted(sessions, key=lambda f: f.stat().st_mtime)
 
 
+import re
+
 def extract_first_message(jsonl_path: str) -> str:
-    """提取第一条用户消息作为 session label"""
+    """提取第一条用户消息作为 session label（跳过 OpenClaw sender metadata）"""
+    # 匹配 OpenClaw 注入的 sender metadata 块
+    _sender_re = re.compile(
+        r"Sender \(untrusted metadata\):\s*```json\s*\{.*?\}\s*```\s*\n*",
+        re.DOTALL,
+    )
+
     try:
         with open(jsonl_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -106,9 +114,13 @@ def extract_first_message(jsonl_path: str) -> str:
                                 if isinstance(c, dict) and c.get("type") == "text":
                                     text = c.get("text", "").strip()
                                     if text:
-                                        return text[:100]
+                                        text = _sender_re.sub("", text).strip()
+                                        if text:
+                                            return text[:100]
                         elif isinstance(content, str):
-                            return content[:100]
+                            text = _sender_re.sub("", content.strip()).strip()
+                            if text:
+                                return text[:100]
     except:
         pass
     return "unknown"
@@ -282,12 +294,12 @@ def main():
             skip_count += 1
             continue
         
+        # 加载消息（先加载，再推断 channel）
+        messages = extract_messages_from_jsonl(session_file)
+        
         # 提取信息
         session_label = extract_first_message(session_path)
-        channel = infer_channel(session_file, [])
-        
-        # 加载消息
-        messages = extract_messages_from_jsonl(session_file)
+        channel = infer_channel(session_file, messages)
         
         # 生成摘要
         summary = generate_summary_from_messages(messages)

@@ -327,22 +327,41 @@ def infer_tags_with_llm(summary: str, conversation_text: str = "", model: str = 
 # ========== Channel 检测 ==========
 
 def infer_channel(path: Path, messages: list) -> str:
-    """从路径或消息内容推断渠道"""
+    """从路径或消息内容推断渠道（OpenClaw session 不区分渠道，只能靠猜测）"""
     filename = path.name.lower()
     if "feishu" in filename:
         return "feishu"
     if "wechat" in filename:
         return "wechat"
     
-    # 检查第一条用户消息
+    # 扫描所有用户消息，寻找渠道线索
     for m in messages:
         if m.get("role") == "user":
             text = m.get("text", m.get("content", "")).lower()
+            # 直接提到渠道
             if "feishu" in text or "飞书" in text:
                 return "feishu"
             if "wechat" in text or "微信" in text:
                 return "wechat"
-            break
+    
+    # Fallback: 检查 Sender metadata 的 label
+    for m in messages:
+        if m.get("role") == "user":
+            text = m.get("text", m.get("content", ""))
+            if "Sender (untrusted metadata)" in text:
+                # 提取 label 字段
+                import re
+                match = re.search(r'"label"\s*:\s*"([^"]+)"', text)
+                if match:
+                    label = match.group(1).lower()
+                    if "feishu" in label:
+                        return "feishu"
+                    if "wechat" in label or "weixin" in label:
+                        return "wechat"
+                    # openclaw-control-ui 是 webchat
+                    if "openclaw-control-ui" in label:
+                        return "webchat"
+                break
     
     return "webchat"
 

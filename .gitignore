@@ -32,3 +32,4 @@ config/secrets.yaml
 # 日志
 *.log
 logs/
+.DS_Store
