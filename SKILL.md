@@ -94,25 +94,11 @@ python3 ~/.qclaw/skills/memoria/scripts/remember.py \
   --summary "xxx" \
   --tags "tag1,tag2"
 
-# 单独记一下（写入 archive + 向量化，重要内容）
-python3 ~/.qclaw/skills/memoria/scripts/archive_important.py \
-  --project "项目名" \
-  --content "要记录的内容（支持 [[链接]] 语法）" \
-  --links "链接1,链接2"
-
 # 记一下（自动抓取当前 session）
 python3 ~/.qclaw/skills/memoria/scripts/archive_important.py \
   --project "auto" \
   --auto \
   --links "memoria,clara"
-```
-
-```bash
-# 记下来（写入热缓存，日常琐事）
-python3 ~/.qclaw/skills/memoria/scripts/remember.py \
-  --channel webchat \
-  --summary "xxx" \
-  --tags "tag1,tag2"
 
 # 单独记一下（写入 archive + 向量化，重要内容）
 python3 ~/.qclaw/skills/memoria/scripts/archive_important.py \
@@ -144,21 +130,6 @@ python3 ~/.qclaw/skills/memoria/scripts/archive_important.py \
 
 ---
 
-## 向量化（通常自动，无需手动）
-
-```bash
-# 增量（auto_archive.py 已自动触发）
-python3 ~/.qclaw/skills/memoria/scripts/vectorize.py
-
-# 从历史归档回填（首次部署或数据迁移）
-python3 ~/.qclaw/skills/memoria/scripts/vectorize.py --from-archive
-
-# 全量重建
-python3 ~/.qclaw/skills/memoria/scripts/vectorize.py --full
-```
-
----
-
 ## 自动化
 
 **唯一定时任务（每晚 23:30）：**
@@ -185,7 +156,7 @@ python3 ~/.qclaw/skills/memoria/scripts/auto_archive.py
 | `recall.py` | 快速检索（热缓存/向量搜索/链接查询） |
 | `recall_with_context.py` | 深度检索（自动获取 archive 原文） |
 | `auto_archive.py` | 每日归档，三层写入 |
-| `archive_important.py` | 手动触发，重要内容写入 archive + 向量化 |
+| `archive_important.py` | 手动触发，支持 `--auto` 自动提取 |
 | `vectorize.py` | 增量/全量向量化 |
 | `remember.py` | 直接写入一条记忆（热缓存） |
 | `memoria_utils.py` | 公共工具库（含链接提取、索引维护） |
