@@ -11,6 +11,7 @@ Memoria 共用工具库
 """
 
 import json
+import re
 import requests
 from datetime import datetime, timezone
 from pathlib import Path
@@ -433,6 +434,117 @@ def load_hot_cache() -> list:
     except Exception as e:
         print(f"⚠️  Failed to load hot cache: {e}")
         return []
+
+
+# ========== 双向链接 ==========
+
+def extract_links(content: str) -> list:
+    """
+    提取 [[xxx]] 格式的链接，统一小写
+    
+    Args:
+        content: 文本内容
+    
+    Returns:
+        链接列表（小写，去重）
+    
+    Example:
+        "Kraken 二期用 [[Redis]] 替代 [[RabbitMQ]]"
+        → ["redis", "rabbitmq"]
+    """
+    if not content:
+        return []
+    
+    links = re.findall(r'\[\[(.+?)\]\]', content)
+    # 统一小写 + 去重 + 去空
+    links = [link.lower().strip() for link in links if link.strip()]
+    return list(dict.fromkeys(links))  # 去重保序
+
+
+def generate_links_index() -> dict:
+    """
+    遍历所有归档，生成链接索引
+    
+    Returns:
+        {"redis": ["id1", "id2"], "kraken": ["id3"]}
+    
+    并写入 links.json
+    """
+    collection = get_chroma_collection()
+    
+    # 获取所有记忆
+    results = collection.get(limit=10000)
+    
+    links_index = {}
+    
+    if results and results.get("ids"):
+        for mid, meta in zip(results["ids"], results["metadatas"]):
+            links_str = meta.get("links", "")
+            if links_str:
+                for link in links_str.split(","):
+                    link = link.strip().lower()
+                    if link:
+                        links_index.setdefault(link, []).append(mid)
+    
+    # 写入 links.json
+    links_file = MEMORIA_DIR / "links.json"
+    try:
+        with open(links_file, "w", encoding="utf-8") as f:
+            json.dump(links_index, f, ensure_ascii=False, indent=2)
+        print(f"✅ 链接索引已生成：{len(links_index)} 个链接")
+    except Exception as e:
+        print(f"⚠️  写入 links.json 失败: {e}")
+    
+    return links_index
+
+
+def load_links_index() -> dict:
+    """
+    加载链接索引（从 links.json）
+    
+    如果文件不存在，自动生成
+    """
+    links_file = MEMORIA_DIR / "links.json"
+    
+    if not links_file.exists():
+        return generate_links_index()
+    
+    try:
+        with open(links_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"⚠️  加载 links.json 失败: {e}")
+        return {}
+
+
+def update_links_index(new_links: list, memory_id: str) -> None:
+    """
+    更新链接索引（增量）
+    
+    Args:
+        new_links: 新增的链接列表
+        memory_id: 记忆 ID
+    """
+    if not new_links:
+        return
+    
+    links_index = load_links_index()
+    
+    for link in new_links:
+        link = link.lower().strip()
+        if link:
+            if link not in links_index:
+                links_index[link] = []
+            if memory_id not in links_index[link]:
+                links_index[link].append(memory_id)
+    
+    # 写回
+    links_file = MEMORIA_DIR / "links.json"
+    try:
+        with open(links_file, "w", encoding="utf-8") as f:
+            json.dump(links_index, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️  更新 links.json 失败: {e}")
 
 
 # ========== Archive 原文获取 ==========

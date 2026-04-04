@@ -23,6 +23,7 @@ from memoria_utils import (
     get_chroma_collection,
     get_embedding,
     load_hot_cache,
+    load_links_index,
     CHROMA_DB_PATH,
 )
 
@@ -131,7 +132,61 @@ def load_combined_memories(days: int = 7, recent_limit: int = 10, important_limi
             for mid, m in sorted_memories[:recent_limit + important_limit]]
 
 
-def search_memories(query: str, limit: int = 5) -> list:
+def search_by_link(link: str, limit: int = 10) -> list:
+    """
+    按链接查询记忆（从 links.json）
+    
+    Args:
+        link: 链接名称（如 "redis"）
+        limit: 最大返回数量
+    
+    Returns:
+        记忆列表 [(id, document, metadata, None), ...]
+    """
+    link = link.lower().strip()
+    if not link:
+        return []
+    
+    # 从 links.json 获取 ID 列表
+    links_index = load_links_index()
+    memory_ids = links_index.get(link, [])
+    
+    if not memory_ids:
+        return []
+    
+    # 从 ChromaDB 批量获取
+    collection = get_chroma_collection()
+    
+    try:
+        results = collection.get(ids=memory_ids[:limit])
+        
+        if not results or not results.get("ids"):
+            return []
+        
+        memories = []
+        for mid, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
+            memories.append((mid, doc, meta, None))
+        
+        return memories
+    
+    except Exception as e:
+        print(f"⚠️  Link search failed: {e}")
+        return []
+
+
+def search_memories(query: str, limit: int = 5, use_links: bool = True) -> list:
+    """
+    语义搜索 + 链接查询
+    
+    Args:
+        query: 查询文本
+        limit: 最大返回数量
+        use_links: 是否同时查询链接
+    
+    Returns:
+        记忆列表 [(id, document, metadata, distance), ...]
+    """
+    # 1. 向量搜索
     query_embedding = get_embedding(query)
     if not query_embedding:
         print("❌ Failed to embed query")
@@ -139,27 +194,41 @@ def search_memories(query: str, limit: int = 5) -> list:
 
     collection = get_chroma_collection()
 
+    memories = []
+    seen_ids = set()
+
     try:
         results = collection.query(query_embeddings=[query_embedding], n_results=limit)
 
-        if not results["ids"] or not results["ids"][0]:
-            print("❌ No similar memories found")
-            return []
-
-        memories = []
-        for i, (mid, doc, distance) in enumerate(zip(
-            results["ids"][0],
-            results["documents"][0],
-            results["distances"][0]
-        )):
-            metadata = results["metadatas"][0][i]
-            memories.append((mid, doc, metadata, distance))
-
-        return memories
+        if results["ids"] and results["ids"][0]:
+            for i, (mid, doc, distance) in enumerate(zip(
+                results["ids"][0],
+                results["documents"][0],
+                results["distances"][0]
+            )):
+                metadata = results["metadatas"][0][i]
+                memories.append((mid, doc, metadata, distance))
+                seen_ids.add(mid)
 
     except Exception as e:
-        print(f"❌ Search failed: {e}")
-        return []
+        print(f"❌ Vector search failed: {e}")
+
+    # 2. 链接查询（可选）
+    if use_links:
+        # 尝试从 query 中提取链接关键词
+        # 简单处理：直接用 query 的第一个词
+        link_keyword = query.lower().split()[0] if query else ""
+        
+        if link_keyword:
+            link_memories = search_by_link(link_keyword, limit=limit)
+            
+            # 合并去重
+            for mid, doc, meta, _ in link_memories:
+                if mid not in seen_ids:
+                    memories.append((mid, doc, meta, None))
+                    seen_ids.add(mid)
+
+    return memories[:limit]
 
 
 def get_recent_memories(days: int = 7, limit: int = 5) -> list:
@@ -238,6 +307,7 @@ def main():
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--simple", action="store_true")
+    parser.add_argument("--no-links", action="store_true", help="禁用链接查询")
 
     args = parser.parse_args()
 
@@ -254,7 +324,8 @@ def main():
         memories = load_combined_memories(days=args.days, recent_limit=10, important_limit=5)
         title = "📚 Combined Memories (Recent + Important)"
     elif args.search:
-        memories = search_memories(args.search, limit=args.limit)
+        use_links = not args.no_links
+        memories = search_memories(args.search, limit=args.limit, use_links=use_links)
         title = f"🔍 Search: '{args.search}'"
     elif args.recent:
         memories = get_recent_memories(days=args.days, limit=args.limit)

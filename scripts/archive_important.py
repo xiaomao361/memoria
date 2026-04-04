@@ -27,28 +27,49 @@ from memoria_utils import (
     get_chroma_collection,
     get_embedding,
     generate_summary,
+    extract_links,
+    update_links_index,
     MEMORIA_DIR,
     ARCHIVE_DIR,
     SUMMARY_MODEL,
 )
 
 
-def archive_important_content(project: str, content: str, tags: list = None) -> dict:
+def archive_important_content(project: str, content: str, tags: list = None, manual_links: list = None) -> dict:
     """
     将重要内容写入 archive 并向量化
+    
+    支持 [[链接]] 语法，自动提取并存入元数据
+    支持手动传入链接，与自动提取的合并
+    
+    Args:
+        project: 项目名称
+        content: 内容（支持 [[链接]] 语法）
+        tags: 标签列表
+        manual_links: 手动传入的链接列表（优先级最高）
     
     Returns:
         {
             "id": "向量ID",
             "archive_path": "archive/.../xxx.txt",
-            "summary": "摘要内容"
+            "summary": "摘要内容",
+            "links": ["链接1", "链接2"]
         }
     """
     # 1. 生成向量 ID
     memory_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     
-    # 2. 写入原始内容到 archive
+    # 2. 提取链接：手动传入 + 自动提取 [[链接]]
+    auto_links = extract_links(content)
+    if manual_links:
+        # 合并去重，手动传入的优先
+        manual_links_lower = [l.lower().strip() for l in manual_links if l.strip()]
+        links = list(dict.fromkeys(manual_links_lower + auto_links))
+    else:
+        links = auto_links
+    
+    # 3. 写入原始内容到 archive
     month_dir = ARCHIVE_DIR / now.strftime("%Y-%m")
     month_dir.mkdir(parents=True, exist_ok=True)
     
@@ -58,6 +79,7 @@ def archive_important_content(project: str, content: str, tags: list = None) -> 
     full_content = f"""# {project}
 # 创建时间: {now.isoformat()}
 # 记忆ID: {memory_id}
+# 链接: {', '.join(links) if links else '无'}
 
 {content}
 """
@@ -65,12 +87,12 @@ def archive_important_content(project: str, content: str, tags: list = None) -> 
     with open(archive_file, "w", encoding="utf-8") as f:
         f.write(full_content)
     
-    # 3. 用 3b 模型生成摘要
+    # 4. 用 3b 模型生成摘要
     summary = generate_summary(content, model=SUMMARY_MODEL)
     if not summary:
         summary = content[:50]  # fallback
     
-    # 4. 写入向量库
+    # 5. 写入向量库
     collection = get_chroma_collection()
     
     # 准备元数据
@@ -81,6 +103,7 @@ def archive_important_content(project: str, content: str, tags: list = None) -> 
         "project": project,
         "archive_path": str(archive_file),
         "tags": ",".join(tags) if tags else "",
+        "links": ",".join(links) if links else "",  # 新增
     }
     
     # 添加到向量库
@@ -91,7 +114,11 @@ def archive_important_content(project: str, content: str, tags: list = None) -> 
         metadatas=[metadata]
     )
     
-    # 5. 同步更新 memoria.json 索引（可选，便于统一检索）
+    # 6. 更新链接索引
+    if links:
+        update_links_index(links, memory_id)
+    
+    # 7. 同步更新 memoria.json 索引（可选，便于统一检索）
     index_file = MEMORIA_DIR / "memoria.json"
     if index_file.exists():
         try:
@@ -111,6 +138,7 @@ def archive_important_content(project: str, content: str, tags: list = None) -> 
         "project": project,
         "archive_path": str(archive_file),
         "storage_type": "archive",
+        "links": links,  # 新增
     }
     index_data["memories"].insert(0, entry)
     
@@ -121,25 +149,30 @@ def archive_important_content(project: str, content: str, tags: list = None) -> 
         "id": memory_id,
         "archive_path": str(archive_file),
         "summary": summary,
+        "links": links,
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Memoria — 单独记录重要内容到 archive")
     parser.add_argument("--project", required=True, help="项目/主题名称")
-    parser.add_argument("--content", required=True, help="要记录的内容")
+    parser.add_argument("--content", required=True, help="要记录的内容（支持 [[链接]] 语法）")
     parser.add_argument("--tags", default="", help="标签，逗号分隔")
+    parser.add_argument("--links", default="", help="手动传入链接，逗号分隔（与 [[链接]] 自动合并）")
     
     args = parser.parse_args()
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
+    manual_links = [l.strip() for l in args.links.split(",") if l.strip()] if args.links else []
     
-    result = archive_important_content(args.project, args.content, tags)
+    result = archive_important_content(args.project, args.content, tags, manual_links if manual_links else None)
     
     print(f"✅ 已写入 archive 并向量化")
     print(f"   ID: {result['id']}")
     print(f"   项目: {args.project}")
     print(f"   摘要: {result['summary']}")
     print(f"   原文路径: {result['archive_path']}")
+    if result.get('links'):
+        print(f"   链接: {', '.join(result['links'])}")
 
 
 if __name__ == "__main__":

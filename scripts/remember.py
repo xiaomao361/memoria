@@ -176,6 +176,7 @@ def write_memory(
     session_label: str = "unknown",
     summary: str = None,
     cold_archive: bool = False,
+    links: list = None,
 ) -> dict:
     """
     写入一条记忆索引。
@@ -188,6 +189,7 @@ def write_memory(
         session_label: session 描述标签
         summary:       精华摘要（必须由调用方总结传入）
         cold_archive:  是否同时备份到冷存储（archive/）
+        links:         链接列表（可选，如 ["redis", "kraken"]）
 
     Returns:
         写入的索引条目 dict
@@ -225,11 +227,21 @@ def write_memory(
         "session_label": session_label,
         "message_count": msg_count,
         "storage_type": "cold+hot" if cold_path else "hot",
+        # 链接
+        "links": links or [],
     }
 
     data = load_index()
     data["memories"].insert(0, entry)
     save_index(data)
+
+    # 更新链接索引
+    if links:
+        try:
+            from memoria_utils import update_links_index
+            update_links_index(links, memory_id)
+        except ImportError:
+            pass  # 静默失败
 
     return entry
 
@@ -255,9 +267,12 @@ def main():
                         help="指定 session JSONL 路径（默认取最新）")
     parser.add_argument("--archive", action="store_true",
                         help="同时备份到冷存储（archive/）")
+    parser.add_argument("--links", default="",
+                        help="链接，逗号分隔（如 redis,kraken）")
 
     args = parser.parse_args()
     tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
+    links = [l.strip().lower() for l in args.links.split(",") if l.strip()] if args.links else []
 
     result = write_memory(
         channel=args.channel,
@@ -267,10 +282,12 @@ def main():
         session_label=args.session_label,
         summary=args.summary,
         cold_archive=args.archive,
+        links=links,
     )
 
     storage = result.get("storage_type", "hot")
     cold_info = f"\n   冷存储：{result.get('cold_path', '')}" if result.get("cold_path") else ""
+    links_info = f"\n   链接: {', '.join(result['links'])}" if result.get('links') else ""
     print(f"✅ 记忆已写入 [{storage}]")
     print(f"   ID: {result['id']}")
     print(f"   渠道: {result['channel']}")
@@ -279,6 +296,7 @@ def main():
     print(f"   热存储: {result.get('session_path', '')}")
     print(f"   Session: {result.get('session_id', '')}")
     print(cold_info)
+    print(links_info)
     print(f"\n精华摘要：{result['summary']}")
 
 
