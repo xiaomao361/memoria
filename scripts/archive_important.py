@@ -2,16 +2,19 @@
 """
 Memoria archive_important.py — 单独记录重要内容到 archive 并向量化
 
-触发时机：用户说"记下来"、"单独记一下"等手动触发
-
-流程：
-1. 写入原始内容到 archive/{YYYY-MM}/{项目名}-{向量ID}.txt
-2. 调用 3b 模型生成摘要
-3. 将摘要写入向量库（带 archive_path 字段）
+触发时机：
+1. 用户说"记下来"、"单独记一下"等手动触发（--content）
+2. 用户说"记一下"（自动抓取当前 session）
 
 用法：
+    # 手动传入内容
     python3 archive_important.py --project "项目名" --content "要记录的内容"
-    python3 archive_important.py --project "Kraken" --content "今天完成了二期团体报告功能"
+    
+    # 自动抓取当前 session
+    python3 archive_important.py --project "auto" --auto
+    
+    # 指定 session
+    python3 archive_important.py --project "auto" --auto --session-id "xxx"
 """
 
 import json
@@ -27,12 +30,79 @@ from memoria_utils import (
     get_chroma_collection,
     get_embedding,
     generate_summary,
+    generate_summary_from_messages,
+    extract_conversation_text,
+    extract_messages_from_jsonl,
+    infer_tags,
     extract_links,
     update_links_index,
     MEMORIA_DIR,
     ARCHIVE_DIR,
+    SESSIONS_DIR,
     SUMMARY_MODEL,
 )
+
+
+def get_latest_session() -> tuple:
+    """获取最新 session JSONL 的 path 和 session_id"""
+    if not SESSIONS_DIR.exists():
+        return None, None
+    files = sorted(SESSIONS_DIR.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not files:
+        return None, None
+    latest = files[0]
+    session_id = latest.stem
+    return str(latest), session_id
+
+
+def auto_extract_from_session(session_id: str = None) -> dict:
+    """
+    自动从 session 提取对话内容
+    
+    Args:
+        session_id: 指定 session ID（可选，默认取最新的）
+    
+    Returns:
+        {
+            "session_id": "xxx",
+            "session_path": "xxx",
+            "messages_text": "对话文本",
+            "summary": "摘要",
+            "tags": ["标签1", "标签2"]
+        }
+    """
+    # 1. 获取 session
+    if session_id:
+        session_path = SESSIONS_DIR / f"{session_id}.jsonl"
+        if not session_path.exists():
+            session_path, session_id = get_latest_session()
+    else:
+        session_path, session_id = get_latest_session()
+    
+    if not session_path or not Path(session_path).exists():
+        return {"error": "未找到 session"}
+    
+    # 2. 提取对话
+    messages = extract_messages_from_jsonl(Path(session_path))
+    if not messages:
+        return {"error": "session 为空"}
+    
+    # 3. 生成摘要
+    summary = generate_summary_from_messages(messages, limit=20)
+    
+    # 4. 推断标签
+    tags = infer_tags(messages)
+    
+    # 5. 提取对话文本
+    messages_text = extract_conversation_text(messages, limit=50)
+    
+    return {
+        "session_id": session_id,
+        "session_path": str(session_path),
+        "messages_text": messages_text,
+        "summary": summary,
+        "tags": tags,
+    }
 
 
 def archive_important_content(project: str, content: str, tags: list = None, manual_links: list = None) -> dict:
@@ -154,17 +224,53 @@ def archive_important_content(project: str, content: str, tags: list = None, man
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Memoria — 单独记录重要内容到 archive")
+    parser = argparse.ArgumentParser(description="Memoria — 记录重要内容到 archive")
     parser.add_argument("--project", required=True, help="项目/主题名称")
-    parser.add_argument("--content", required=True, help="要记录的内容（支持 [[链接]] 语法）")
+    parser.add_argument("--content", default="", help="手动内容（不传则自动抓取 session）")
     parser.add_argument("--tags", default="", help="标签，逗号分隔")
     parser.add_argument("--links", default="", help="手动传入链接，逗号分隔（与 [[链接]] 自动合并）")
+    parser.add_argument("--auto", action="store_true", help="自动从当前 session 提取内容")
+    parser.add_argument("--session-id", default="", help="指定 session ID（配合 --auto 使用）")
     
     args = parser.parse_args()
-    tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
-    manual_links = [l.strip() for l in args.links.split(",") if l.strip()] if args.links else []
     
-    result = archive_important_content(args.project, args.content, tags, manual_links if manual_links else None)
+    # 自动模式
+    if args.auto:
+        print("🔄 正在从 session 提取内容...")
+        auto_data = auto_extract_from_session(args.session_id if args.session_id else None)
+        
+        if "error" in auto_data:
+            print(f"❌ {auto_data['error']}")
+            sys.exit(1)
+        
+        # 构建内容
+        content = f"""【对话摘要】
+{auto_data['summary']}
+
+【对话内容】
+{auto_data['messages_text']}"""
+        
+        print(f"✅ 已提取对话")
+        print(f"   Session: {auto_data['session_id']}")
+        print(f"   摘要: {auto_data['summary']}")
+        print(f"   标签: {', '.join(auto_data['tags'])}")
+        print()
+        
+        # 使用自动提取的标签
+        tags = auto_data['tags']
+        manual_links = []
+        
+    else:
+        # 手动模式
+        if not args.content:
+            print("❌ 请传入 --content 或使用 --auto")
+            sys.exit(1)
+        
+        content = args.content
+        tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
+        manual_links = [l.strip() for l in args.links.split(",") if l.strip()] if args.links else []
+    
+    result = archive_important_content(args.project, content, tags, manual_links if manual_links else None)
     
     print(f"✅ 已写入 archive 并向量化")
     print(f"   ID: {result['id']}")

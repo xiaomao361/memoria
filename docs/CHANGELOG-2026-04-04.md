@@ -1,5 +1,34 @@
 # CHANGELOG — 2026-04-04
 
+## 自动归档内容提取
+
+新增 `--auto` 参数，自动从当前 session 提取对话内容。
+
+### 新增
+
+- `--auto` 参数：自动从 session 提取对话
+- `--session-id` 参数：指定 session ID
+- `auto_extract_from_session()` 函数：提取 session 对话、生成摘要、推断标签
+
+### 使用方式
+
+```bash
+# 自动抓取当前 session
+python3 scripts/archive_important.py --project "auto" --auto
+
+# 自动抓取 + 传链接
+python3 scripts/archive_important.py --project "auto" --auto --links "memoria,clara"
+```
+
+### 判断逻辑
+
+| 用户说法 | 模式 | 说明 |
+|----------|------|------|
+| 「记一下」 | 自动 | 自动抓取 session |
+| 「单独记」 | 手动 | 我整理内容后传入 |
+
+---
+
 ## 双向链接功能
 
 借鉴 Obsidian 的双向链接设计，为 Memoria 增加了 `[[链接]]` 支持。

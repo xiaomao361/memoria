@@ -84,8 +84,28 @@ python3 ~/.qclaw/skills/memoria/scripts/recall.py --important
 | 用户说法 | 内容类型 | 调用脚本 | 存储 |
 |----------|----------|----------|------|
 | 「记一下」+ 日常琐事/喜好 | 偏好、趣事、日常 | `remember.py` | 热缓存（50条轮转） |
-| 「记一下」+ 项目/技术/决策 | 方案、待办、约定 | `archive_important.py` | 冷存储 + 向量化 |
-| 「单独记」「全量记」「这个很重要」 | 任何 | `archive_important.py` | 冷存储 + 向量化 |
+| 「记一下」+ 项目/技术/决策 | 方案、待办、约定 | `archive_important.py --auto` | 冷存储 + 向量化 |
+| 「单独记」「全量记」「这个很重要」 | 任何 | `archive_important.py --content` | 冷存储 + 向量化 |
+
+```bash
+# 记下来（写入热缓存，日常琐事）
+python3 ~/.qclaw/skills/memoria/scripts/remember.py \
+  --channel webchat \
+  --summary "xxx" \
+  --tags "tag1,tag2"
+
+# 单独记一下（写入 archive + 向量化，重要内容）
+python3 ~/.qclaw/skills/memoria/scripts/archive_important.py \
+  --project "项目名" \
+  --content "要记录的内容（支持 [[链接]] 语法）" \
+  --links "链接1,链接2"
+
+# 记一下（自动抓取当前 session）
+python3 ~/.qclaw/skills/memoria/scripts/archive_important.py \
+  --project "auto" \
+  --auto \
+  --links "memoria,clara"
+```
 
 ```bash
 # 记下来（写入热缓存，日常琐事）
