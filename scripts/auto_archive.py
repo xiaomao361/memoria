@@ -1,77 +1,52 @@
-#!/usr/local/bin/python3.12
+#!/usr/bin/env python3
 """
-Memoria auto_archive.py — 每日自动归档
+Memoria auto_archive.py — Session 冷备份
 
 定时任务：每天 23:30 执行
-扫描当天新增 sessions，排除已归档的，同时写入：
-  1. memoria.json（热缓存，最近 N 条）
-  2. ChromaDB（向量索引，语义搜索）
-  3. archive/（冷备份，全量历史）
+扫描当天新增 sessions，备份到 sessions_backup/{YYYY-MM}/
 
-使用 qwen2.5:3b-instruct-q4_K_M 生成高质量摘要
+注意：
+- 完全独立于记忆写入流程
+- 不写入 memoria.json / 向量库 / links.json
+- 只做 session 冷备份，防止 OpenClaw 清理导致对话丢失
 """
 
+import argparse
 import json
-import os
-import uuid
+import sys
 from datetime import datetime, timezone, date
 from pathlib import Path
 
-# 导入共用工具库
-from memoria_utils import (
-    get_chroma_collection,
-    get_embedding,
-    generate_summary_from_messages,
-    is_valid_summary,
-    get_session_start_time,
-    extract_messages_from_jsonl,
-    infer_tags,
-    infer_tags_with_llm,
-    infer_channel,
-    MEMORIA_DIR,
-    ARCHIVE_DIR,
-    MEMORIA_INDEX_FILE,
-    SESSIONS_DIR,
-    CHROMA_DB_PATH,
-)
+# 添加 lib 目录到路径
+sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-# 热缓存配置
-HOT_CACHE_LIMIT = 50  # memoria.json 保留最近 50 条
+from lib.config import MEMORIA_ROOT
 
+# Session 冷备份目录
+SESSIONS_BACKUP_DIR = MEMORIA_ROOT / "sessions_backup"
 
-def load_index() -> dict:
-    """加载热缓存索引"""
-    if MEMORIA_INDEX_FILE.exists():
-        try:
-            with open(MEMORIA_INDEX_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {"memories": [], "version": "3.1", "description": "热缓存（最近 N 条）"}
-
-
-def save_index(data: dict):
-    """保存热缓存，超过限制时清理旧的"""
-    MEMORIA_DIR.mkdir(parents=True, exist_ok=True)
-    
-    memories = data.get("memories", [])
-    if len(memories) > HOT_CACHE_LIMIT:
-        memories = memories[:HOT_CACHE_LIMIT]
-        data["memories"] = memories
-        data["cleaned_at"] = datetime.now(timezone.utc).isoformat()
-    
-    with open(MEMORIA_INDEX_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+# OpenClaw sessions 目录（main agent）
+SESSIONS_DIR = Path.home() / ".qclaw" / "agents" / "main" / "sessions"
 
 
 def get_archived_session_ids() -> set:
-    """获取已归档的 session_id 集合"""
-    data = load_index()
-    return {m.get("session_id") for m in data.get("memories", []) if m.get("session_id")}
+    """获取已备份的 session_id 集合"""
+    if not SESSIONS_BACKUP_DIR.exists():
+        return set()
+    
+    archived_ids = set()
+    for month_dir in SESSIONS_BACKUP_DIR.iterdir():
+        if month_dir.is_dir():
+            for f in month_dir.glob("*.jsonl"):
+                # 文件名格式：{session_id}_{timestamp}.jsonl
+                session_id = f.name.split("_")[0]
+                archived_ids.add(session_id)
+    
+    return archived_ids
 
 
-def get_today_sessions() -> list:
-    """获取今天修改的 session 文件"""
+def get_sessions(since_days: int = 1) -> list[Path]:
+    """获取最近 N 天修改的 session 文件"""
     if not SESSIONS_DIR.exists():
         return []
     
@@ -82,257 +57,130 @@ def get_today_sessions() -> list:
         if ".deleted." in f.name:
             continue
         mtime = datetime.fromtimestamp(f.stat().st_mtime)
-        if mtime.date() == today:
+        if (today - mtime.date()).days < since_days:
             sessions.append(f)
     
-    return sorted(sessions, key=lambda f: f.stat().st_mtime)
+    return sorted(sessions, key=lambda f: f.stat().st_mtime, reverse=True)
 
 
-import re
-
-def extract_first_message(jsonl_path: str) -> str:
-    """提取第一条用户消息作为 session label（跳过 OpenClaw sender metadata）"""
-    # 匹配 OpenClaw 注入的 sender metadata 块
-    _sender_re = re.compile(
-        r"Sender \(untrusted metadata\):\s*```json\s*\{.*?\}\s*```\s*\n*",
-        re.DOTALL,
-    )
-
-    try:
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                obj = json.loads(line)
-                if obj.get("type") == "message":
-                    msg = obj.get("message", {})
-                    if msg.get("role") == "user":
-                        content = msg.get("content", [])
-                        if isinstance(content, list):
-                            for c in content:
-                                if isinstance(c, dict) and c.get("type") == "text":
-                                    text = c.get("text", "").strip()
-                                    if text:
-                                        text = _sender_re.sub("", text).strip()
-                                        if text:
-                                            return text[:100]
-                        elif isinstance(content, str):
-                            text = _sender_re.sub("", content.strip()).strip()
-                            if text:
-                                return text[:100]
-    except:
-        pass
-    return "unknown"
-
-
-def count_messages(jsonl_path: str) -> int:
-    """统计消息数"""
-    count = 0
-    try:
-        with open(jsonl_path, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    obj = json.loads(line.strip())
-                    if obj.get("type") == "message":
-                        msg = obj.get("message", {})
-                        if msg.get("role") in ("user", "assistant"):
-                            count += 1
-                except:
-                    continue
-    except:
-        pass
-    return count
-
-
-def archive_session(session_path: str, session_id: str, session_label: str, channel: str, messages: list) -> str | None:
-    """备份到冷存储"""
-    if not Path(session_path).exists():
-        return None
+def backup_session(session_path: Path) -> tuple[str, str]:
+    """
+    备份单个 session
     
-    if not messages:
-        return None
+    Returns:
+        (session_id, backup_path)
+    """
+    session_id = session_path.stem
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     
-    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-    now = datetime.now(timezone.utc)
-    month_dir = ARCHIVE_DIR / now.strftime("%Y-%m")
+    # 按月归档
+    dt = datetime.now(timezone.utc)
+    month_dir = SESSIONS_BACKUP_DIR / f"{dt.year}-{dt.month:02d}"
     month_dir.mkdir(parents=True, exist_ok=True)
     
-    safe_label = session_label.replace("/", "_").replace("\\", "_")[:30]
-    archive_file = month_dir / f"{channel}_{safe_label}_{session_id[:8]}.json"
+    # 备份文件名
+    backup_file = month_dir / f"{session_id}_{timestamp}.jsonl"
     
-    archive_data = {
-        "archived_at": now.isoformat(),
-        "channel": channel,
-        "session_label": session_label,
-        "session_id": session_id,
-        "message_count": len(messages),
-        "messages": messages
+    # 复制文件
+    import shutil
+    shutil.copy2(session_path, backup_file)
+    
+    return session_id, str(backup_file)
+
+
+def auto_archive(since_days: int = 1, dry_run: bool = False) -> dict:
+    """
+    自动备份 sessions
+    
+    Args:
+        since_days: 扫描最近 N 天的 sessions
+        dry_run: 仅列出，不实际备份
+    
+    Returns:
+        {
+            "total": 总数,
+            "archived": 新备份数,
+            "skipped": 已存在跳过数,
+            "errors": [错误信息]
+        }
+    """
+    print(f"Memoria Session 冷备份")
+    print(f"扫描最近 {since_days} 天的 sessions...")
+    print("=" * 50)
+    
+    # 获取已备份的 session_id
+    archived_ids = get_archived_session_ids()
+    print(f"已备份 session 数: {len(archived_ids)}")
+    
+    # 获取待备份的 sessions
+    sessions = get_sessions(since_days)
+    print(f"待扫描 session 数: {len(sessions)}")
+    
+    if not sessions:
+        print("\n无需备份")
+        return {
+            "total": 0,
+            "archived": 0,
+            "skipped": 0,
+            "errors": []
+        }
+    
+    # 备份
+    archived_count = 0
+    skipped_count = 0
+    errors = []
+    
+    for session_path in sessions:
+        session_id = session_path.stem
+        
+        # 跳过已备份的
+        if session_id in archived_ids:
+            skipped_count += 1
+            continue
+        
+        if dry_run:
+            print(f"  [dry-run] 会备份: {session_id}")
+            archived_count += 1
+            continue
+        
+        try:
+            session_id, backup_path = backup_session(session_path)
+            print(f"  ✅ {session_id}")
+            archived_count += 1
+        except Exception as e:
+            errors.append(f"{session_id}: {e}")
+            print(f"  ❌ {session_id}: {e}")
+    
+    print("\n" + "=" * 50)
+    print(f"备份完成: 新增 {archived_count} 条，跳过 {skipped_count} 条（已备份）")
+    
+    if errors:
+        print(f"\n错误: {len(errors)} 条")
+    
+    return {
+        "total": len(sessions),
+        "archived": archived_count,
+        "skipped": skipped_count,
+        "errors": errors
     }
-    
-    try:
-        with open(archive_file, "w", encoding="utf-8") as f:
-            json.dump(archive_data, f, ensure_ascii=False, indent=2)
-        return str(archive_file)
-    except IOError:
-        return None
-
-
-def write_to_chromadb(session_id: str, summary: str, timestamp: str, channel: str, tags: list) -> bool:
-    """写入 ChromaDB（向量索引）"""
-    collection = get_chroma_collection()
-    if not collection:
-        return False
-    
-    embedding = get_embedding(summary)
-    if not embedding:
-        return False
-    
-    try:
-        collection.upsert(
-            ids=[session_id],
-            embeddings=[embedding],
-            documents=[summary],
-            metadatas=[{
-                "timestamp": timestamp,
-                "channel": channel,
-                "tags": ",".join(tags),
-                "session_id": session_id,
-                "source": "auto_archive",
-            }]
-        )
-        return True
-    except Exception as e:
-        print(f"❌ ChromaDB 写入失败: {e}")
-        return False
-
-
-def write_memory(
-    channel: str,
-    tags: list,
-    session_id: str,
-    session_path: str,
-    session_label: str,
-    summary: str,
-    messages: list,
-    cold_archive: bool = True
-) -> dict | None:
-    """写入单条记忆（三层：热缓存 + 向量 + 冷备份）"""
-    
-    # P0-3: 摘要质量校验
-    if not is_valid_summary(summary):
-        print(f"   ⚠️  摘要质量不足，跳过: {summary[:30]}")
-        return None
-    
-    msg_count = count_messages(session_path)
-    
-    # 冷备份
-    cold_path = None
-    if cold_archive:
-        cold_path = archive_session(session_path, session_id, session_label, channel, messages)
-    
-    memory_id = str(uuid.uuid4())
-    
-    # P0-1: 从消息中提取对话实际时间
-    timestamp = get_session_start_time(messages)
-    
-    entry = {
-        "id": memory_id,
-        "timestamp": timestamp,
-        "channel": channel,
-        "tags": tags,
-        "summary": summary,
-        "session_id": session_id,
-        "session_path": session_path,
-        "cold_path": cold_path or "",
-        "session_label": session_label,
-        "message_count": msg_count,
-        "storage_type": "cold+hot+vector" if cold_path else "hot+vector",
-    }
-    
-    # 写入热缓存（memoria.json）
-    data = load_index()
-    data["memories"].insert(0, entry)
-    save_index(data)
-    
-    # P0-2: 同时写入向量索引（ChromaDB）
-    chroma_success = write_to_chromadb(
-        session_id=session_id,
-        summary=summary,
-        timestamp=timestamp,
-        channel=channel,
-        tags=tags
-    )
-    
-    if not chroma_success:
-        print(f"   ⚠️  ChromaDB 写入失败，仅存入热缓存")
-    
-    return entry
 
 
 def main():
-    print(f"🗓️ [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始每日归档...")
+    parser = argparse.ArgumentParser(description="Memoria Session 冷备份")
+    parser.add_argument("--since-days", type=int, default=1, help="扫描最近 N 天的 sessions")
+    parser.add_argument("--dry-run", action="store_true", help="仅列出，不实际备份")
     
-    # 获取已归档的 session_id
-    archived_ids = get_archived_session_ids()
-    print(f"   已归档 session 数: {len(archived_ids)}")
+    args = parser.parse_args()
     
-    # 获取今天的 sessions
-    today_sessions = get_today_sessions()
-    print(f"   今日 session 数: {len(today_sessions)}")
+    result = auto_archive(since_days=args.since_days, dry_run=args.dry_run)
     
-    new_count = 0
-    skip_count = 0
-    new_memory_ids = []
-    
-    for session_file in today_sessions:
-        session_id = session_file.stem
-        session_path = str(session_file)
-        
-        # 跳过已归档的
-        if session_id in archived_ids:
-            skip_count += 1
-            continue
-        
-        # 加载消息（先加载，再推断 channel）
-        messages = extract_messages_from_jsonl(session_file)
-        
-        # 提取信息
-        session_label = extract_first_message(session_path)
-        channel = infer_channel(session_file, messages)
-        
-        # 生成摘要
-        summary = generate_summary_from_messages(messages)
-        if not summary:
-            summary = session_label[:50] if session_label else "unknown"
-        
-        # P1-3: 先用规则推断 tags，再用 LLM 补充
-        rule_tags = infer_tags(messages)
-        if rule_tags == ["未分类"]:
-            llm_tags = infer_tags_with_llm(summary)
-            tags_to_use = llm_tags
-        else:
-            tags_to_use = rule_tags
-        
-        # 写入三层
-        result = write_memory(
-            channel=channel,
-            tags=tags_to_use + ["自动归档"],
-            session_id=session_id,
-            session_path=session_path,
-            session_label=session_label,
-            summary=summary,
-            messages=messages,
-            cold_archive=True
-        )
-        
-        if result:
-            new_memory_ids.append(result["id"])
-            new_count += 1
-            print(f"   ✅ 新归档: {summary[:40]}...")
-    
-    print(f"\n📊 归档完成: 新增 {new_count} 条，跳过 {skip_count} 条（已归档）")
-    # 注意：write_memory() 已同时写入 ChromaDB，无需再调用 vectorize.py（避免双写）
+    # 输出 JSON 结果
+    print("\nJSON 结果:")
+    print(json.dumps({
+        "total": result["total"],
+        "archived": result["archived"],
+        "skipped": result["skipped"]
+    }, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

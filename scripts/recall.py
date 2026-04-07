@@ -1,350 +1,283 @@
-#!/usr/local/bin/python3.12
+#!/usr/bin/env python3
 """
-Recall memories from three-layer storage:
-  1. memoria.json（热缓存，最近 N 条，快速访问）
-  2. ChromaDB（向量索引，语义搜索）
-  3. archive/ + sessions/（冷备份，全量历史）
+Memoria 统一读取入口 recall()
 
-Usage:
-    python3 recall.py --combined --simple              # Load combined memories (default)
-    python3 recall.py --search "query"                 # Semantic search
-    python3 recall.py --search "query" --limit 10      # Search with limit
-    python3 recall.py --recent --days 7 --limit 5      # Recent memories
-    python3 recall.py --important --limit 3            # Important memories only
-    python3 recall.py --hot-cache                      # Only check hot cache (fastest)
+用法:
+    # 语义搜索
+    python3 recall.py --query "之前讨论的队列方案"
+    
+    # 标签搜索
+    python3 recall.py --tags "kraken,redis"
+    
+    # 精确定位
+    python3 recall.py --memory-id "xxx" --include-content
+    
+    # 启动加载
+    python3 recall.py --hot-cache --simple
+
+返回:
+    [
+        {
+            "memory_id": "xxx",
+            "summary": "...",
+            "tags": [...],
+            "links": [...],
+            "timestamp": "...",
+            "source": "...",
+            "content": "..."  # 仅 --include-content 时返回
+        },
+        ...
+    ]
 """
 
-import sys
 import argparse
-from datetime import datetime, timedelta, timezone
+import json
+import sys
+from pathlib import Path
 
-# 导入共用工具库
-from memoria_utils import (
-    get_chroma_collection,
-    get_embedding,
-    load_hot_cache,
-    load_links_index,
-    CHROMA_DB_PATH,
-)
+# 添加 lib 目录到路径
+sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-
-def parse_ts(ts) -> datetime:
-    """Parse timestamp (Unix float or ISO string) to UTC-aware datetime."""
-    try:
-        if isinstance(ts, (int, float)):
-            return datetime.fromtimestamp(float(ts), tz=timezone.utc)
-        ts_str = str(ts).replace("Z", "+00:00")
-        dt = datetime.fromisoformat(ts_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except:
-        return datetime.min.replace(tzinfo=timezone.utc)
+from lib.archive import read_archive_txt
+from lib.vector import search_vector
+from lib.hot_cache import list_hot_cache, get_from_hot_cache
+from lib.links import get_memories_by_links
 
 
-def format_memory(memory_id: str, document: str, metadata: dict, distance: float = None) -> str:
-    ts = metadata.get("timestamp", "")
-    channel = metadata.get("channel", "")
-    tags = metadata.get("tags", "")
-    if isinstance(tags, list):
-        tags = ",".join(tags)
-
-    try:
-        time_str = parse_ts(ts).strftime("%m-%d %H:%M")
-    except:
-        time_str = "unknown"
-
-    output = f"[{memory_id[:8]}...] {time_str} | {channel}"
-    if tags:
-        output += f" | {tags}"
-    if distance is not None:
-        similarity = max(0, (1 - distance)) * 100
-        output += f" | {similarity:.1f}%"
-    output += f"\n  {document[:100]}\n"
-    return output
-
-
-def load_combined_memories(days: int = 7, recent_limit: int = 10, important_limit: int = 5) -> list:
-    """加载组合记忆：优先热缓存，fallback 到 ChromaDB"""
-    
-    # 1. 尝试从热缓存加载
-    hot_memories = load_hot_cache()
-    
-    if hot_memories:
-        # 过滤最近 N 天
-        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
-        recent_memories = []
-        
-        for mid, doc, meta, _ in hot_memories:
-            ts = parse_ts(meta.get("timestamp", ""))
-            is_recent = ts >= cutoff_date
-            is_important = "重要" in meta.get("tags", [])
-            
-            if is_recent or is_important:
-                recent_memories.append((mid, doc, meta, None))
-        
-        if recent_memories:
-            print(f"⚡ 从热缓存加载 {len(recent_memories)} 条记忆")
-            return recent_memories[:recent_limit + important_limit]
-    
-    # 2. Fallback 到 ChromaDB
-    print(f"📂 热缓存为空，从 ChromaDB 加载...")
-    collection = get_chroma_collection()
-
-    if collection.count() == 0:
-        print("⚠️  No memories in database")
-        return []
-
-    cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
-    combined = {}
-
-    try:
-        # P1-1: 使用 ChromaDB 原生 where 过滤（Unix 时间戳）
-        results = collection.get(
-            where={"timestamp": {"$gte": cutoff_ts}},
-            limit=1000
-        )
-
-        if results and results.get("ids"):
-            for mid, doc, meta in zip(
-                results["ids"],
-                results["documents"],
-                results["metadatas"]
-            ):
-                is_important = "重要" in meta.get("tags", "")
-                combined[mid] = {
-                    "document": doc,
-                    "metadata": meta,
-                    "type": "important" if is_important else "recent",
-                    "timestamp": parse_ts(meta.get("timestamp", 0))
-                }
-    except Exception as e:
-        print(f"⚠️  ChromaDB where 过滤失败: {e}")
-        return []
-
-    sorted_memories = sorted(
-        combined.items(),
-        key=lambda x: x[1]["timestamp"],
-        reverse=True
-    )
-
-    return [(mid, m["document"], m["metadata"], None)
-            for mid, m in sorted_memories[:recent_limit + important_limit]]
-
-
-def search_by_link(link: str, limit: int = 10) -> list:
+def recall_by_tags(tags: list[str], limit: int = 5, include_content: bool = False) -> list[dict]:
     """
-    按链接查询记忆（从 links.json）
+    通过标签搜索
     
     Args:
-        link: 链接名称（如 "redis"）
-        limit: 最大返回数量
+        tags: 标签列表
+        limit: 返回条数
+        include_content: 是否包含原文
     
     Returns:
-        记忆列表 [(id, document, metadata, None), ...]
+        记忆列表
     """
-    link = link.lower().strip()
-    if not link:
-        return []
-    
-    # 从 links.json 获取 ID 列表
-    links_index = load_links_index()
-    memory_ids = links_index.get(link, [])
+    # 通过 links 索引获取 memory_id 列表
+    memory_ids = get_memories_by_links(tags)
     
     if not memory_ids:
         return []
     
-    # 从 ChromaDB 批量获取
-    collection = get_chroma_collection()
+    # 从热缓存获取摘要
+    results = []
+    for memory_id in memory_ids[:limit]:
+        entry = get_from_hot_cache(memory_id)
+        if entry:
+            result = {
+                "memory_id": entry.get("memory_id"),
+                "summary": entry.get("summary"),
+                "tags": entry.get("tags", []),
+                "links": entry.get("links", []),
+                "timestamp": entry.get("timestamp"),
+                "source": entry.get("source")
+            }
+            
+            # 如果需要原文
+            if include_content:
+                archive_path = entry.get("archive_path")
+                if archive_path:
+                    archive_data = read_archive_txt(archive_path)
+                    if archive_data:
+                        result["content"] = archive_data.get("content")
+            
+            results.append(result)
     
-    try:
-        results = collection.get(ids=memory_ids[:limit])
-        
-        if not results or not results.get("ids"):
-            return []
-        
-        memories = []
-        for mid, doc, meta in zip(results["ids"], results["documents"], results["metadatas"]):
-            memories.append((mid, doc, meta, None))
-        
-        return memories
-    
-    except Exception as e:
-        print(f"⚠️  Link search failed: {e}")
-        return []
+    return results
 
 
-def search_memories(query: str, limit: int = 5, use_links: bool = True) -> list:
+def recall_by_query(query: str, limit: int = 5, include_content: bool = False) -> list[dict]:
     """
-    语义搜索 + 链接查询
+    通过语义搜索
     
     Args:
         query: 查询文本
-        limit: 最大返回数量
-        use_links: 是否同时查询链接
+        limit: 返回条数
+        include_content: 是否包含原文
     
     Returns:
-        记忆列表 [(id, document, metadata, distance), ...]
+        记忆列表
     """
-    # 1. 向量搜索
-    query_embedding = get_embedding(query)
-    if not query_embedding:
-        print("❌ Failed to embed query")
+    # 向量搜索
+    vector_results = search_vector(query, limit)
+    
+    if not vector_results:
         return []
-
-    collection = get_chroma_collection()
-
-    memories = []
-    seen_ids = set()
-
-    try:
-        results = collection.query(query_embeddings=[query_embedding], n_results=limit)
-
-        if results["ids"] and results["ids"][0]:
-            for i, (mid, doc, distance) in enumerate(zip(
-                results["ids"][0],
-                results["documents"][0],
-                results["distances"][0]
-            )):
-                metadata = results["metadatas"][0][i]
-                memories.append((mid, doc, metadata, distance))
-                seen_ids.add(mid)
-
-    except Exception as e:
-        print(f"❌ Vector search failed: {e}")
-
-    # 2. 链接查询（可选）
-    if use_links:
-        # 尝试从 query 中提取链接关键词
-        # 简单处理：直接用 query 的第一个词
-        link_keyword = query.lower().split()[0] if query else ""
+    
+    # 构建结果
+    results = []
+    for vr in vector_results:
+        # 从热缓存获取摘要
+        entry = get_from_hot_cache(vr.get("memory_id"))
         
-        if link_keyword:
-            link_memories = search_by_link(link_keyword, limit=limit)
-            
-            # 合并去重
-            for mid, doc, meta, _ in link_memories:
-                if mid not in seen_ids:
-                    memories.append((mid, doc, meta, None))
-                    seen_ids.add(mid)
-
-    return memories[:limit]
-
-
-def get_recent_memories(days: int = 7, limit: int = 5) -> list:
-    collection = get_chroma_collection()
-    cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
-
-    try:
-        # P1-1: ChromaDB 原生 where 过滤（Unix 时间戳）
-        results = collection.get(
-            where={"timestamp": {"$gte": cutoff_ts}},
-            limit=1000
-        )
-
-        if not results or not results.get("ids"):
-            return []
-
-        memories = []
-        for mid, doc, meta in zip(
-            results["ids"],
-            results["documents"],
-            results["metadatas"]
-        ):
-            memories.append((mid, doc, meta, None))
-
-        memories.sort(
-            key=lambda x: parse_ts(x[2].get("timestamp", 0)),
-            reverse=True
-        )
-        return memories[:limit]
-
-    except Exception as e:
-        print(f"❌ Failed to get recent memories: {e}")
-        return []
+        if entry:
+            result = {
+                "memory_id": entry.get("memory_id"),
+                "summary": entry.get("summary"),
+                "tags": entry.get("tags", []),
+                "links": entry.get("links", []),
+                "timestamp": entry.get("timestamp"),
+                "source": entry.get("source"),
+                "score": vr.get("score")
+            }
+        else:
+            # 热缓存没有，用 metadata
+            metadata = vr.get("metadata", {})
+            result = {
+                "memory_id": vr.get("memory_id"),
+                "summary": metadata.get("tags", "").split(",")[0] if metadata.get("tags") else "",
+                "tags": metadata.get("tags", "").split(",") if metadata.get("tags") else [],
+                "links": metadata.get("links", "").split(",") if metadata.get("links") else [],
+                "timestamp": metadata.get("timestamp"),
+                "source": metadata.get("source"),
+                "score": vr.get("score")
+            }
+        
+        # 如果需要原文
+        if include_content:
+            archive_path = vr.get("archive_path")
+            if archive_path:
+                archive_data = read_archive_txt(archive_path)
+                if archive_data:
+                    result["content"] = archive_data.get("content")
+        
+        results.append(result)
+    
+    return results
 
 
-def get_important_memories(limit: int = 5) -> list:
-    collection = get_chroma_collection()
+def recall_by_memory_id(memory_id: str, include_content: bool = True) -> dict:
+    """
+    精确定位某条记忆
+    
+    Args:
+        memory_id: 记忆 ID
+        include_content: 是否包含原文
+    
+    Returns:
+        记忆详情
+    """
+    # 从热缓存获取
+    entry = get_from_hot_cache(memory_id)
+    
+    if not entry:
+        return None
+    
+    result = {
+        "memory_id": entry.get("memory_id"),
+        "summary": entry.get("summary"),
+        "tags": entry.get("tags", []),
+        "links": entry.get("links", []),
+        "timestamp": entry.get("timestamp"),
+        "source": entry.get("source")
+    }
+    
+    # 如果需要原文
+    if include_content:
+        archive_path = entry.get("archive_path")
+        if archive_path:
+            archive_data = read_archive_txt(archive_path)
+            if archive_data:
+                result["content"] = archive_data.get("content")
+    
+    return result
 
-    try:
-        results = collection.get(limit=1000)
-        if not results["ids"]:
-            return []
 
-        memories = [
-            (mid, doc, meta, None)
-            for mid, doc, meta in zip(results["ids"], results["documents"], results["metadatas"])
-            if "重要" in meta.get("tags", "")
-        ]
+def recall_hot_cache(simple: bool = False) -> list[dict]:
+    """
+    启动加载热缓存
+    
+    Args:
+        simple: 简单模式，只返回 summary
+    
+    Returns:
+        热缓存条目列表
+    """
+    entries = list_hot_cache()
+    
+    if simple:
+        # 简单模式：只返回 summary
+        return [{"summary": e.get("summary")} for e in entries]
+    
+    return entries
 
-        if not memories:
-            print("⚠️  No important memories found")
 
-        return memories[:limit]
-
-    except Exception as e:
-        print(f"❌ Failed to get important memories: {e}")
-        return []
-
-
-def print_memories(memories: list, title: str = ""):
-    if not memories:
-        return
-    if title:
-        print(f"\n{title}\n")
-    for mid, doc, meta, distance in memories:
-        print(format_memory(mid, doc, meta, distance))
+def recall(
+    query: str = None,
+    tags: list[str] = None,
+    memory_id: str = None,
+    limit: int = 5,
+    include_content: bool = False
+) -> list[dict]:
+    """
+    统一读取入口
+    
+    Args:
+        query: 语义搜索
+        tags: 标签搜索
+        memory_id: 精确定位
+        limit: 返回条数
+        include_content: 是否包含原文
+    
+    Returns:
+        记忆列表
+    """
+    # 优先级：memory_id > tags > query
+    if memory_id:
+        result = recall_by_memory_id(memory_id, include_content)
+        return [result] if result else []
+    
+    if tags:
+        return recall_by_tags(tags, limit, include_content)
+    
+    if query:
+        return recall_by_query(query, limit, include_content)
+    
+    # 都没有，返回空
+    return []
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Recall memories from three-layer storage")
-    parser.add_argument("--combined", action="store_true")
-    parser.add_argument("--search", type=str)
-    parser.add_argument("--recent", action="store_true")
-    parser.add_argument("--important", action="store_true")
-    parser.add_argument("--hot-cache", action="store_true", help="Only check hot cache (fastest)")
-    parser.add_argument("--days", type=int, default=7)
-    parser.add_argument("--limit", type=int, default=5)
-    parser.add_argument("--simple", action="store_true")
-    parser.add_argument("--no-links", action="store_true", help="禁用链接查询")
-
+    parser = argparse.ArgumentParser(description="Memoria 统一读取入口")
+    
+    # 查询参数（互斥）
+    parser.add_argument("--query", default=None, help="语义搜索")
+    parser.add_argument("--tags", default=None, help="标签搜索，逗号分隔")
+    parser.add_argument("--memory-id", default=None, help="精确定位")
+    
+    # 其他参数
+    parser.add_argument("--limit", type=int, default=5, help="返回条数")
+    parser.add_argument("--include-content", action="store_true", help="是否包含原文")
+    
+    # 启动加载模式
+    parser.add_argument("--hot-cache", action="store_true", help="启动加载热缓存")
+    parser.add_argument("--simple", action="store_true", help="简单模式，只返回 summary")
+    
     args = parser.parse_args()
-
-    if not any([args.combined, args.search, args.recent, args.important, args.hot_cache]):
-        args.combined = True
-
-    memories = []
-    title = ""
-
+    
+    # 启动加载模式
     if args.hot_cache:
-        memories = load_hot_cache()
-        title = "⚡ Hot Cache (memoria.json)"
-    elif args.combined:
-        memories = load_combined_memories(days=args.days, recent_limit=10, important_limit=5)
-        title = "📚 Combined Memories (Recent + Important)"
-    elif args.search:
-        use_links = not args.no_links
-        memories = search_memories(args.search, limit=args.limit, use_links=use_links)
-        title = f"🔍 Search: '{args.search}'"
-    elif args.recent:
-        memories = get_recent_memories(days=args.days, limit=args.limit)
-        title = f"📅 Recent ({args.days} days)"
-    elif args.important:
-        memories = get_important_memories(limit=args.limit)
-        title = "⭐ Important"
-
-    if args.simple:
-        for i, (mid, doc, meta, distance) in enumerate(memories, 1):
-            tags = meta.get("tags", "")
-            if isinstance(tags, list):
-                tags = ",".join(tags)
-            # timestamp 可能是 float（Unix）或 str（ISO）
-            ts = meta.get("timestamp", "")
-            ts_str = parse_ts(ts).strftime("%Y-%m-%d") if ts else ""
-            print(f"[{ts_str}][{meta.get('channel', '')}][{tags}] {doc[:80]}")
-    else:
-        print_memories(memories, title)
+        results = recall_hot_cache(simple=args.simple)
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return
+    
+    # 解析 tags
+    tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
+    
+    # 调用 recall
+    results = recall(
+        query=args.query,
+        tags=tags,
+        memory_id=args.memory_id,
+        limit=args.limit,
+        include_content=args.include_content
+    )
+    
+    # 输出结果
+    print(json.dumps(results, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

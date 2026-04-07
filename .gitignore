@@ -32,4 +32,8 @@ config/secrets.yaml
 # 日志
 *.log
 logs/
+
+# 杂项
 .DS_Store
+data.links.json.bak
+memoria.json.bak
