@@ -1,373 +1,292 @@
 #!/usr/bin/env python3
 """
-Memoria 数据迁移脚本
+Memoria Lite ↔ Full 迁移工具
 
-将旧数据从 ~/.qclaw/skills/memoria/ 迁移到 ~/.qclaw/memoria/
+用法:
+    python3 migrate.py --to lite      # Full → Lite（降级）
+    python3 migrate.py --to full      # Lite → Full（升级）
+    python3 migrate.py --to full --force  # 强制重建向量库
 
-流程：
-1. 备份旧 JSON 到安全位置
-2. 转换 JSON → TXT（清洗无效内容）
-3. 迁移 TXT 到新 archive/
-4. 生成迁移报告
-
-清洗规则（不迁移）：
-- Cron session（文件名含 [cron:）
-- Heartbeat 消息
-- 网络错误/超时
-- 摘要无效（"自动归档"、"任务完成"等）
+功能:
+    Lite ↔ Full 数据格式完全兼容，此脚本主要用于：
+    - Lite → Full: 重建向量库（chroma_db）
+    - Full → Lite: 确认数据完整，更新配置
+    - 检查 Archive 完整性
 """
 
 import argparse
 import json
-import re
-import shutil
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 # 添加 lib 目录到路径
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from lib.config import ARCHIVE_DIR, MEMORIA_ROOT
-from lib.utils import generate_memory_id, get_utc_timestamp
-
-# 旧路径
-OLD_MEMORIA_ROOT = Path.home() / ".qclaw" / "skills" / "memoria"
-OLD_ARCHIVE_DIR = OLD_MEMORIA_ROOT / "archive"
-
-# 备份路径
-BACKUP_DIR = Path.home() / ".qclaw" / "memoria_backup_旧数据"
-
-# 清洗规则
-SKIP_PATTERNS = [
-    r"\[cron:",           # Cron session
-    r"heartbeat",         # Heartbeat
-    r"自动归档",          # 自动归档标记
-    r"任务完成，归档了",  # 自动归档完成消息
-]
-
-# 无效摘要模式
-INVALID_SUMMARY_PATTERNS = [
-    r"^自动归档$",
-    r"^任务完成",
-    r"^总结对话核心内容如下",
-    r"^无摘要$",
-]
+from lib.config import (
+    MEMORIA_ROOT,
+    ARCHIVE_DIR,
+    CHROMA_DB_PATH,
+    HOT_CACHE_PATH,
+    LINKS_PATH,
+    enable_vector,
+    disable_vector,
+    is_vector_enabled
+)
+from lib.archive import list_archive_txts, read_archive_txt
 
 
-def should_skip(filename: str, summary: str = "") -> tuple[bool, str]:
-    """
-    判断是否应该跳过
+def check_archive_integrity() -> dict:
+    """检查 Archive 完整性"""
+    print("\n检查 Archive 完整性...")
     
-    Returns:
-        (should_skip, reason)
-    """
-    # 检查文件名
-    for pattern in SKIP_PATTERNS:
-        if re.search(pattern, filename, re.IGNORECASE):
-            return True, f"匹配跳过规则: {pattern}"
+    archive_paths = list_archive_txts()
     
-    # 检查摘要
-    if summary:
-        for pattern in INVALID_SUMMARY_PATTERNS:
-            if re.search(pattern, summary, re.IGNORECASE):
-                return True, f"无效摘要: {pattern}"
+    if not archive_paths:
+        print("  ⚠️  未发现任何 Archive 文件")
+        return {"total": 0, "valid": 0, "invalid": 0}
     
-    return False, ""
-
-
-def extract_summary_from_json(data: dict) -> str:
-    """从旧 JSON 数据中提取摘要"""
-    # 尝试从 session_label 提取
-    session_label = data.get("session_label", "")
-    if session_label:
-        # 去掉前缀时间戳
-        label = re.sub(r"^\[[^\]]+\]\s*", "", session_label)
-        if label and len(label) > 5:
-            return label[:200]
+    valid_count = 0
+    invalid_count = 0
+    errors = []
     
-    # 尝试从 messages 提取第一条用户消息
-    messages = data.get("messages", [])
-    for msg in messages:
-        if msg.get("role") == "user":
-            text = msg.get("text", "")
-            # 去掉 Sender 元数据
-            text = re.sub(r"Sender \(untrusted metadata\):.*?```\n\n", "", text, flags=re.DOTALL)
-            text = re.sub(r"^\[[^\]]+\]\s*", "", text)
-            if text and len(text) > 5:
-                return text[:200]
-    
-    return "无摘要"
-
-
-def extract_content_from_json(data: dict) -> str:
-    """从旧 JSON 数据中提取内容（用于 TXT 正文）"""
-    messages = data.get("messages", [])
-    lines = []
-    
-    for msg in messages:
-        role = msg.get("role", "")
-        text = msg.get("text", "")
-        
-        if not text:
-            continue
-        
-        # 去掉 Sender 元数据
-        text = re.sub(r"Sender \(untrusted metadata\):.*?```\n\n", "", text, flags=re.DOTALL)
-        
-        # 截断过长消息
-        if len(text) > 500:
-            text = text[:500] + "..."
-        
-        if role == "user":
-            lines.append(f"用户: {text}")
-        elif role == "assistant":
-            lines.append(f"Clara: {text}")
-    
-    return "\n\n".join(lines)
-
-
-def infer_tags_from_json(data: dict) -> list[str]:
-    """从旧 JSON 数据推断 tags"""
-    tags = ["memoria", "迁移"]
-    
-    # 从 channel 推断
-    channel = data.get("channel", "")
-    if channel:
-        tags.append(channel)
-    
-    # 从 session_label 推断
-    session_label = data.get("session_label", "")
-    if session_label:
-        # 关键词匹配
-        keywords = {
-            "memoria": "memoria",
-            "记忆": "memoria",
-            "Clara": "clara",
-            "clara": "clara",
-            "织影": "织影",
-            "Vera": "vera",
-            "Iris": "iris",
-            "Nova": "nova",
-            "Kraken": "kraken",
-            "ThreadVibe": "threadvibe",
-            "埃洛维亚": "埃洛维亚",
-            "divine": "divine",
-            "技术": "技术",
-            "设计": "设计",
-            "架构": "架构",
-        }
-        for kw, tag in keywords.items():
-            if kw in session_label:
-                if tag not in tags:
-                    tags.append(tag)
-    
-    return tags[:10]  # 最多 10 个
-
-
-def convert_json_to_txt(json_path: Path, output_dir: Path) -> tuple[Path | None, str]:
-    """
-    转换旧 JSON 到新 TXT 格式
-    
-    Returns:
-        (txt_path, error_msg)
-    """
-    try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        return None, f"读取失败: {e}"
-    
-    # 提取摘要
-    summary = extract_summary_from_json(data)
-    
-    # 检查是否跳过
-    should_skip_it, reason = should_skip(json_path.name, summary)
-    if should_skip_it:
-        return None, f"跳过: {reason}"
-    
-    # 生成 memory_id
-    memory_id = generate_memory_id()
-    
-    # 提取字段
-    timestamp_str = data.get("archived_at", "")
-    if timestamp_str:
+    for path in archive_paths:
         try:
-            dt = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
-            created_str = dt.strftime("%Y-%m-%dT%H:%M:%S%z")
-        except:
-            created_str = get_timestamp_iso()
-    else:
-        created_str = get_utc_timestamp()
+            data = read_archive_txt(path)
+            if data and data.get("memory_id"):
+                valid_count += 1
+            else:
+                invalid_count += 1
+                errors.append(f"{path}: 缺少 memory_id")
+        except Exception as e:
+            invalid_count += 1
+            errors.append(f"{path}: {e}")
     
-    # 推断 tags
-    tags = infer_tags_from_json(data)
-    links = tags.copy()  # 初始 links = tags
+    print(f"  总计: {len(archive_paths)} 条")
+    print(f"  有效: {valid_count} 条")
+    if invalid_count > 0:
+        print(f"  无效: {invalid_count} 条")
+        for err in errors[:5]:
+            print(f"    - {err}")
     
-    # 提取内容
-    content = extract_content_from_json(data)
+    return {
+        "total": len(archive_paths),
+        "valid": valid_count,
+        "invalid": invalid_count,
+        "errors": errors
+    }
+
+
+def migrate_to_lite(force: bool = False):
+    """从 Full 降级到 Lite"""
+    print("🔄 正在迁移到 Lite 版本...")
+    print("=" * 50)
     
-    # 确定 archive 子目录（按月）
-    dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-    month_dir = output_dir / f"{dt.year}-{dt.month:02d}"
-    month_dir.mkdir(parents=True, exist_ok=True)
+    # 检查 Archive 完整性
+    integrity = check_archive_integrity()
     
-    # 生成 TXT 内容
-    txt_content = f"""# {summary[:50]}
-
-memory_id: {memory_id}
-created: {created_str}
-source: migrated
-tags: {', '.join(tags)}
-links: {', '.join(links)}
-session_id: {data.get('session_id', '')}
-version: 4.0
-
----
-
-## 摘要
-
-{summary}
-
-## 背景
-
-从旧 Memoria 系统迁移（原文件：{json_path.name}）
-
-## 要点
-
-{content[:1000]}
-
-## 后续
-
-无
-"""
+    if integrity["valid"] == 0:
+        print("\n❌ Archive 数据不完整，无法迁移")
+        return False
     
-    # 写入 TXT
-    txt_path = month_dir / f"{memory_id}.txt"
+    # 更新配置：禁用向量
+    disable_vector()
+    
+    # 写入配置文件
+    config_path = MEMORIA_ROOT / "config.json"
+    config = {
+        "version": "4.0-lite",
+        "root": str(MEMORIA_ROOT),
+        "hot_cache_limit": 200,
+        "vector_enabled": False
+    }
+    
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+    
+    print("\n✅ 迁移完成！")
+    print(f"  - 向量搜索已关闭")
+    print(f"  - 配置文件已更新")
+    print(f"\n可选操作：删除向量库释放空间")
+    print(f"  rm -rf {CHROMA_DB_PATH}")
+    
+    return True
+
+
+def migrate_to_full(force: bool = False):
+    """从 Lite 升级到 Full"""
+    print("🔄 正在迁移到 Full 版本...")
+    print("=" * 50)
+    
+    # 检查 Ollama 是否运行
+    print("\n检查 Ollama 状态...")
     try:
-        with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(txt_content)
-        return txt_path, ""
-    except Exception as e:
-        return None, f"写入失败: {e}"
-
-
-def migrate_txt_files(output_dir: Path) -> tuple[int, int]:
-    """
-    迁移旧 TXT 文件（直接复制）
+        import requests
+        response = requests.get("http://localhost:11434/api/tags", timeout=5)
+        if response.status_code == 200:
+            print("  ✓ Ollama 正在运行")
+        else:
+            print("  ⚠️  Ollama 返回异常状态")
+    except ImportError:
+        print("  ⚠️  requests 库未安装，跳过 Ollama 检查")
+        print("    请手动确认 Ollama 已启动")
+    except Exception:
+        print("  ⚠️  Ollama 未运行")
+        print("    请先启动 Ollama: ollama serve")
+        print("    然后拉取模型: ollama pull BAAI/bge-m3")
     
-    Returns:
-        (success_count, failed_count)
-    """
-    success = 0
-    failed = 0
+    # 检查 Archive 完整性
+    integrity = check_archive_integrity()
     
-    for month_dir in OLD_ARCHIVE_DIR.iterdir():
-        if not month_dir.is_dir():
-            continue
+    if integrity["valid"] == 0:
+        print("\n❌ Archive 数据为空，无法迁移")
+        return False
+    
+    # 检查向量库
+    if CHROMA_DB_PATH.exists() and not force:
+        print(f"\n⚠️  向量库已存在 ({CHROMA_DB_PATH})")
+        print("  使用 --force 强制重建")
+        print("  或者删除向量库后重试")
         
-        for txt_file in month_dir.glob("*.txt"):
-            try:
-                # 目标目录
-                target_month = output_dir / month_dir.name
-                target_month.mkdir(parents=True, exist_ok=True)
-                
-                # 复制
-                shutil.copy2(txt_file, target_month / txt_file.name)
-                success += 1
-            except Exception as e:
-                print(f"  ✗ {txt_file.name}: {e}")
-                failed += 1
+        # 更新配置但不重建向量库
+        enable_vector()
+        config_path = MEMORIA_ROOT / "config.json"
+        config = {
+            "version": "4.0-full",
+            "root": str(MEMORIA_ROOT),
+            "hot_cache_limit": 200,
+            "vector_enabled": True
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        
+        print("\n✅ 配置已更新（未重建向量库）")
+        print("  如需重建向量库，使用: python3 migrate.py --to full --force")
+        return True
     
-    return success, failed
+    # 重建向量库
+    print("\n重建向量库...")
+    
+    try:
+        # 动态导入向量模块
+        sys.path.insert(0, str(Path(__file__).parent / "lib"))
+        from lib.vector import get_collection, write_vector
+        
+        collection = get_collection()
+        
+        archive_paths = list_archive_txts()
+        success_count = 0
+        fail_count = 0
+        
+        for i, path in enumerate(archive_paths):
+            try:
+                data = read_archive_txt(path)
+                if not data or not data.get("memory_id"):
+                    fail_count += 1
+                    continue
+                
+                write_vector(
+                    memory_id=data["memory_id"],
+                    archive_path=path,
+                    content=data.get("content", ""),
+                    tags=data.get("tags", []),
+                    links=data.get("links", []),
+                    source=data.get("source", "manual"),
+                    session_id=data.get("session_id", "")
+                )
+                success_count += 1
+                
+                if (i + 1) % 10 == 0:
+                    print(f"  进度: {i + 1}/{len(archive_paths)}")
+                
+            except Exception as e:
+                fail_count += 1
+                print(f"  失败: {path} - {e}")
+        
+        # 更新配置
+        enable_vector()
+        config_path = MEMORIA_ROOT / "config.json"
+        config = {
+            "version": "4.0-full",
+            "root": str(MEMORIA_ROOT),
+            "hot_cache_limit": 200,
+            "vector_enabled": True
+        }
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        
+        print(f"\n✅ 迁移完成！")
+        print(f"  - 向量库已重建: {success_count} 条成功，{fail_count} 条失败")
+        print(f"  - 向量搜索已开启")
+        print(f"  - 配置文件已更新")
+        
+        return fail_count == 0
+        
+    except ImportError as e:
+        print(f"\n❌ 缺少依赖: {e}")
+        print("  请安装 Full 版本依赖:")
+        print("    pip install chromadb ollama")
+        print("  然后重启迁移脚本")
+        return False
+    except Exception as e:
+        print(f"\n❌ 迁移失败: {e}")
+        return False
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Memoria 数据迁移")
-    parser.add_argument("--dry-run", action="store_true", help="仅统计，不实际迁移")
-    parser.add_argument("--skip-cron", action="store_true", default=True, help="跳过 cron session")
+    parser = argparse.ArgumentParser(
+        description="Memoria Lite ↔ Full 迁移工具",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+    # 降级到 Lite
+    python3 migrate.py --to lite
+    
+    # 升级到 Full（首次）
+    python3 migrate.py --to full
+    
+    # 升级到 Full（重建向量库）
+    python3 migrate.py --to full --force
+    
+    # 检查当前状态
+    python3 migrate.py --status
+"""
+    )
+    parser.add_argument(
+        "--to",
+        choices=["lite", "full"],
+        help="目标版本: lite 或 full"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="强制迁移，覆盖已有数据"
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="检查当前状态"
+    )
     
     args = parser.parse_args()
     
-    print("Memoria 数据迁移")
-    print("=" * 50)
-    
-    # Step 1: 统计旧数据
-    print("\n[1/4] 统计旧数据...")
-    
-    old_json_count = 0
-    old_txt_count = 0
-    cron_count = 0
-    
-    for month_dir in OLD_ARCHIVE_DIR.iterdir():
-        if not month_dir.is_dir():
-            continue
-        
-        for f in month_dir.iterdir():
-            if f.suffix == ".json":
-                old_json_count += 1
-                if "[cron:" in f.name:
-                    cron_count += 1
-            elif f.suffix == ".txt":
-                old_txt_count += 1
-    
-    print(f"  旧 JSON: {old_json_count} 条")
-    print(f"  旧 TXT: {old_txt_count} 条")
-    print(f"  Cron session: {cron_count} 条（将跳过）")
-    print(f"  待迁移: {old_json_count - cron_count + old_txt_count} 条")
-    
-    if args.dry_run:
-        print("\n[dry-run] 仅统计，不实际迁移")
+    # 状态检查
+    if args.status or not args.to:
+        print("Memoria 状态检查")
+        print("=" * 50)
+        print(f"版本: {'Full' if is_vector_enabled() else 'Lite'}")
+        print(f"根目录: {MEMORIA_ROOT}")
+        print(f"向量库: {'存在' if CHROMA_DB_PATH.exists() else '不存在'}")
+        integrity = check_archive_integrity()
+        print(f"Archive: {integrity['valid']} 条有效记录")
         return
     
-    # Step 2: 备份旧数据
-    print("\n[2/4] 备份旧数据...")
-    
-    if BACKUP_DIR.exists():
-        print(f"  备份目录已存在: {BACKUP_DIR}")
+    # 执行迁移
+    if args.to == "lite":
+        success = migrate_to_lite(force=args.force)
     else:
-        shutil.copytree(OLD_ARCHIVE_DIR, BACKUP_DIR / "archive")
-        print(f"  ✓ 已备份到: {BACKUP_DIR}")
+        success = migrate_to_full(force=args.force)
     
-    # Step 3: 迁移 TXT 文件
-    print("\n[3/4] 迁移 TXT 文件...")
-    
-    txt_success, txt_failed = migrate_txt_files(ARCHIVE_DIR)
-    print(f"  ✓ TXT 迁移: 成功 {txt_success} 条，失败 {txt_failed} 条")
-    
-    # Step 4: 转换 JSON → TXT
-    print("\n[4/4] 转换 JSON → TXT...")
-    
-    json_success = 0
-    json_skipped = 0
-    json_failed = 0
-    
-    for month_dir in OLD_ARCHIVE_DIR.iterdir():
-        if not month_dir.is_dir():
-            continue
-        
-        for json_file in month_dir.glob("*.json"):
-            txt_path, error = convert_json_to_txt(json_file, ARCHIVE_DIR)
-            
-            if txt_path:
-                json_success += 1
-            elif "跳过" in error:
-                json_skipped += 1
-            else:
-                json_failed += 1
-                if json_failed <= 10:
-                    print(f"  ✗ {json_file.name}: {error}")
-    
-    print(f"  ✓ JSON 转换: 成功 {json_success} 条，跳过 {json_skipped} 条，失败 {json_failed} 条")
-    
-    # 总结
-    print("\n" + "=" * 50)
-    print("迁移完成")
-    print(f"  TXT 迁移: {txt_success} 条")
-    print(f"  JSON 转换: {json_success} 条")
-    print(f"  跳过: {json_skipped} 条（cron/无效）")
-    print(f"  失败: {txt_failed + json_failed} 条")
-    print(f"\n下一步: 运行 python3 rebuild.py --force 重建索引")
+    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":

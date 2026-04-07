@@ -219,6 +219,8 @@ def list_archive_txts(month: str = None) -> list[str]:
         return [f"{month}/{f.name}" for f in month_dir.glob("*.txt")]
     else:
         result = []
+        if not ARCHIVE_DIR.exists():
+            return result
         for month_dir in ARCHIVE_DIR.iterdir():
             if month_dir.is_dir():
                 for f in month_dir.glob("*.txt"):

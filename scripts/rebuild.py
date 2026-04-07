@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Memoria 重建索引工具 rebuild()
+Memoria Lite 重建索引工具 rebuild()
 
 用法:
     python3 rebuild.py              # 增量重建（只补缺失的）
     python3 rebuild.py --force      # 强制重建（清空后重建）
 
 功能:
-    扫描 archive/ 目录下所有 TXT 文件 → 重建三个可恢复的存储：
-    - chroma_db（向量库）
+    扫描 archive/ 目录下所有 TXT 文件 → 重建两个可恢复的存储：
     - memoria.json（热缓存）
     - links.json（链接索引）
 
@@ -16,6 +15,7 @@ Memoria 重建索引工具 rebuild()
     - archive TXT 是唯一真实来源
     - 增量模式是幂等的，可以反复执行
     - 不删除 archive 中的任何文件
+    - 不涉及向量库（Lite 版本不使用）
 """
 
 import argparse
@@ -26,59 +26,10 @@ from pathlib import Path
 # 添加 lib 目录到路径
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from lib.config import CHROMA_DB_PATH, HOT_CACHE_PATH, LINKS_PATH
+from lib.config import HOT_CACHE_PATH, LINKS_PATH, ensure_directories
 from lib.archive import list_archive_txts, read_archive_txt
-from lib.vector import get_collection, write_vector
 from lib.hot_cache import read_hot_cache, write_hot_cache
 from lib.links import read_links_index, write_links_index
-
-
-def get_existing_memory_ids() -> set:
-    """获取已存在于向量库中的 memory_id"""
-    try:
-        collection = get_collection()
-        if not collection:
-            return set()
-        
-        # 查询所有记录（ChromaDB 没有"列出所有 ID"的 API，需要用 get）
-        result = collection.get(include=[])
-        return set(result.get("ids", []))
-    except:
-        return set()
-
-
-def clear_all():
-    """清空所有存储（仅在 --force 时调用）"""
-    print("  ⚠️  强制模式：清空所有数据...")
-    
-    # 清空向量库
-    try:
-        import chromadb
-        from chromadb.config import Settings
-        client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
-        try:
-            client.delete_collection(name="memoria")
-        except:
-            pass
-        print("    ✓ 向量库已清空")
-    except Exception as e:
-        print(f"    ✗ 向量库清空失败: {e}")
-    
-    # 清空热缓存
-    try:
-        if HOT_CACHE_PATH.exists():
-            HOT_CACHE_PATH.unlink()
-        print("    ✓ 热缓存已清空")
-    except Exception as e:
-        print(f"    ✗ 热缓存清空失败: {e}")
-    
-    # 清空 links 索引
-    try:
-        if LINKS_PATH.exists():
-            LINKS_PATH.unlink()
-        print("    ✓ links 索引已清空")
-    except Exception as e:
-        print(f"    ✗ links 索引清空失败: {e}")
 
 
 def extract_summary_from_content(content: str) -> str:
@@ -114,21 +65,30 @@ def rebuild(force: bool = False) -> dict:
             "errors": [错误信息]
         }
     """
-    print("Memoria 重建索引")
+    print("Memoria Lite 重建索引")
     print("=" * 50)
     
-    # Step 1: 强制模式清空数据
+    # 确保目录存在
+    ensure_directories()
+    
+    # Step 1: 初始化或读取现有数据
     if force:
-        print("\n[1/4] 清空旧数据...")
-        clear_all()
-        existing_ids = set()
+        print("\n[1/3] 强制模式：清空旧数据...")
+        hot_cache_data = {"memories": []}
+        links_index = {}
     else:
-        print("\n[1/4] 检查已有数据...")
-        existing_ids = get_existing_memory_ids()
-        print(f"  已存在 {len(existing_ids)} 条记忆")
+        print("\n[1/3] 检查已有数据...")
+        hot_cache_data = read_hot_cache()
+        if not hot_cache_data:
+            hot_cache_data = {"memories": []}
+        links_index = read_links_index()
+        if not links_index:
+            links_index = {}
+        existing_count = len(hot_cache_data.get("memories", []))
+        print(f"  热缓存已有 {existing_count} 条")
     
     # Step 2: 扫描 archive TXT
-    print("\n[2/4] 扫描 archive TXT...")
+    print("\n[2/3] 扫描 archive TXT...")
     archive_paths = list_archive_txts()
     print(f"  发现 {len(archive_paths)} 条记忆")
     
@@ -142,32 +102,16 @@ def rebuild(force: bool = False) -> dict:
             "errors": []
         }
     
+    # 热缓存中的 memory_id 集合（用于快速查找）
+    hot_cache_ids = {m.get("memory_id") for m in hot_cache_data.get("memories", [])}
+    
     # Step 3: 重建索引
-    print("\n[3/4] 重建索引...")
+    print("\n[3/3] 重建索引...")
     
     errors = []
     added_count = 0
     skipped_count = 0
     failed_count = 0
-    
-    # 热缓存数据（增量模式：读取现有的）
-    if force:
-        hot_cache_data = {"memories": []}
-    else:
-        hot_cache_data = read_hot_cache()
-        if not hot_cache_data:
-            hot_cache_data = {"memories": []}
-    
-    # 热缓存中的 memory_id 集合
-    hot_cache_ids = {m.get("memory_id") for m in hot_cache_data.get("memories", [])}
-    
-    # links 索引数据（增量模式：读取现有的）
-    if force:
-        links_index = {}
-    else:
-        links_index = read_links_index()
-        if not links_index:
-            links_index = {}
     
     for archive_path in archive_paths:
         try:
@@ -186,7 +130,7 @@ def rebuild(force: bool = False) -> dict:
                 continue
             
             # 增量模式：跳过已存在的
-            if not force and memory_id in existing_ids:
+            if not force and memory_id in hot_cache_ids:
                 skipped_count += 1
                 continue
             
@@ -201,32 +145,20 @@ def rebuild(force: bool = False) -> dict:
             # 提取摘要
             summary = extract_summary_from_content(content)
             
-            # 写入向量库
-            write_vector(
-                memory_id=memory_id,
-                archive_path=archive_path,
-                content=content,
-                tags=tags,
-                links=links,
-                source=source,
-                session_id=session_id
-            )
-            
-            # 添加到热缓存（如果不在热缓存中）
-            if memory_id not in hot_cache_ids:
-                hot_cache_data["memories"].append({
-                    "id": memory_id,
-                    "timestamp": timestamp,
-                    "tags": tags,
-                    "links": links,
-                    "summary": summary,
-                    "source": source,
-                    "memory_id": memory_id,
-                    "archive_path": archive_path,
-                    "session_id": session_id,
-                    "storage_type": "hot"
-                })
-                hot_cache_ids.add(memory_id)
+            # 添加到热缓存
+            hot_cache_data["memories"].append({
+                "id": memory_id,
+                "timestamp": timestamp,
+                "tags": tags,
+                "links": links,
+                "summary": summary,
+                "source": source,
+                "memory_id": memory_id,
+                "archive_path": archive_path,
+                "session_id": session_id,
+                "storage_type": "hot"
+            })
+            hot_cache_ids.add(memory_id)
             
             # 更新 links 索引
             for link in links:
@@ -237,12 +169,15 @@ def rebuild(force: bool = False) -> dict:
             
             added_count += 1
             
+            if added_count % 10 == 0:
+                print(f"  进度: {added_count}/{len(archive_paths)}")
+            
         except Exception as e:
             errors.append(f"{archive_path}: {e}")
             failed_count += 1
     
-    # Step 4: 写入热缓存和 links 索引
-    print("\n[4/4] 写入热缓存和 links 索引...")
+    # 写入热缓存和 links 索引
+    print("\n  写入热缓存和 links 索引...")
     
     # 按时间排序热缓存（最新的在前）
     hot_cache_data["memories"].sort(
@@ -277,7 +212,7 @@ def rebuild(force: bool = False) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Memoria 重建索引")
+    parser = argparse.ArgumentParser(description="Memoria Lite 重建索引")
     parser.add_argument("--force", action="store_true", help="强制清空后重建")
     
     args = parser.parse_args()

@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Memoria 统一写入入口 store()
+Memoria Lite 统一写入入口 store()
+
+三步写入（去掉向量层）：
+    Step 1: 写入 Archive TXT
+    Step 2: 更新热缓存
+    Step 3: 更新 links 索引
 
 用法:
     python3 store.py --content "..." --tags "tag1,tag2" --source manual
@@ -12,7 +17,6 @@ Memoria 统一写入入口 store()
         "archive_path": "archive/2026-04/xxx.txt",
         "status": {
             "archive": "ok",
-            "vector": "ok",
             "hot_cache": "ok",
             "links": "ok"
         }
@@ -28,7 +32,7 @@ from pathlib import Path
 # 添加 lib 目录到路径
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from lib.config import LOGS_DIR
+from lib.config import LOGS_DIR, ensure_directories
 from lib.utils import (
     generate_memory_id,
     get_utc_timestamp,
@@ -37,7 +41,6 @@ from lib.utils import (
     extract_summary
 )
 from lib.archive import write_archive_txt
-from lib.vector import write_vector
 from lib.hot_cache import add_to_hot_cache
 from lib.links import update_links_index
 
@@ -78,7 +81,7 @@ def store(
     session_id: str = None
 ) -> dict:
     """
-    统一写入入口
+    统一写入入口（三步，不含向量）
     
     Args:
         content: 正文内容（按 TXT 模板格式）
@@ -90,15 +93,19 @@ def store(
         {
             "memory_id": "uuid",
             "archive_path": "archive/.../xxx.txt",
+            "tags": [...],
+            "links": [...],
             "status": {
                 "archive": "ok",
-                "vector": "ok",
                 "hot_cache": "ok",
                 "links": "ok"
             }
         }
     """
     start_time = time.time()
+    
+    # 确保目录存在
+    ensure_directories()
     
     # 生成 memory_id
     memory_id = generate_memory_id()
@@ -115,7 +122,6 @@ def store(
     # 初始化状态
     status = {
         "archive": "ok",
-        "vector": "ok",
         "hot_cache": "ok",
         "links": "ok"
     }
@@ -132,28 +138,17 @@ def store(
         )
     except Exception as e:
         status["archive"] = f"failed: {e}"
-        # archive 失败是核心失败，直接返回
         duration_ms = int((time.time() - start_time) * 1000)
         log_store_result(memory_id, source, status, duration_ms)
         return {
             "memory_id": memory_id,
             "archive_path": None,
+            "tags": tags,
+            "links": links,
             "status": status
         }
     
-    # Step 2: 写向量库
-    if not write_vector(
-        memory_id=memory_id,
-        archive_path=archive_path,
-        content=content,
-        tags=tags,
-        links=links,
-        source=source,
-        session_id=session_id
-    ):
-        status["vector"] = "failed"
-    
-    # Step 3: 写热缓存
+    # Step 2: 写热缓存
     if not add_to_hot_cache(
         memory_id=memory_id,
         archive_path=archive_path,
@@ -165,7 +160,7 @@ def store(
     ):
         status["hot_cache"] = "failed"
     
-    # Step 4: 写 links 索引
+    # Step 3: 写 links 索引
     if not update_links_index(links=links, memory_id=memory_id):
         status["links"] = "failed"
     
@@ -178,12 +173,14 @@ def store(
     return {
         "memory_id": memory_id,
         "archive_path": archive_path,
+        "tags": tags,
+        "links": links,
         "status": status
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Memoria 统一写入入口")
+    parser = argparse.ArgumentParser(description="Memoria Lite 统一写入入口")
     parser.add_argument("--content", required=True, help="正文内容")
     parser.add_argument("--tags", default="", help="预置标签，逗号分隔")
     parser.add_argument("--source", default="manual", choices=["manual", "proactive"], help="触发来源")
