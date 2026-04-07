@@ -170,19 +170,25 @@ class SearchResult:
 # =============================================================================
 
 def search_by_tags(
-    query_tags: list[str],
+    query: str,
     limit: int = 10
 ) -> list[SearchResult]:
     """
     标签精确匹配
     
     Args:
-        query_tags: 查询标签列表
+        query: 标签字符串或列表
         limit: 返回数量上限
     
     Returns:
         SearchResult 列表
     """
+    # 支持传入字符串（单个标签）或列表
+    if isinstance(query, str):
+        query_tags = [query]
+    else:
+        query_tags = list(query)
+    
     if not query_tags:
         return []
     
@@ -190,19 +196,30 @@ def search_by_tags(
     links_data = read_links_index()
     links_index = links_data.get("links", {})
     
-    # 收集匹配的 memory_id
+    # 读取热缓存
+    hot_cache = read_hot_cache()
+    memories = hot_cache.get("memories", [])
+    memory_map = {m["memory_id"]: m for m in memories}
+    
+    # 收集匹配的 memory_id（两条路径）
     memory_ids = set()
+    
+    # 路径1: links_index 精确匹配（[[xxx]] 链接）
     for tag in query_tags:
         if tag in links_index:
             memory_ids.update(links_index[tag])
     
+    # 路径2: 热缓存 tags 字段精确匹配（直接标签）
+    for memory in memories:
+        memory_tags = [t.lower() for t in memory.get("tags", [])]
+        for query_tag in query_tags:
+            if query_tag in memory_tags:
+                memory_ids.add(memory.get("memory_id"))
+    
     if not memory_ids:
         return []
     
-    # 读取热缓存获取详细信息
-    hot_cache = read_hot_cache()
-    memory_map = {m["memory_id"]: m for m in hot_cache.get("memories", [])}
-    
+    # 构建结果
     results = []
     for memory_id in list(memory_ids)[:limit]:
         if memory_id in memory_map:
@@ -387,7 +404,7 @@ def search_hybrid(
     混合搜索：先标签匹配，再关键词补充
     
     策略：
-    1. 标签匹配（最快）
+    1. 标签匹配（最快）：直接用查询原文作为标签候选（不做 tokenize，避免破坏词组）
     2. 如果结果 >= limit/2，直接返回
     3. 否则，关键词搜索补充
     4. 合并去重，按得分排序
@@ -399,12 +416,11 @@ def search_hybrid(
     Returns:
         SearchResult 列表
     """
-    # 提取查询词作为标签候选
-    query_keywords = tokenize(query)
-    query_tags = list(query_keywords)  # 简化处理：关键词同时作为标签
+    # 直接用查询字符串作为标签候选（不过滤停用词，保持词组完整性）
+    query_for_tags = [query.strip().lower()]
     
     # Step 1: 标签匹配
-    tag_results = search_by_tags(query_tags, limit=limit)
+    tag_results = search_by_tags(query_for_tags, limit=limit)
     
     if len(tag_results) >= limit // 2:
         return tag_results[:limit]
