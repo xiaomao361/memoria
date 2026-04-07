@@ -224,3 +224,48 @@ def list_archive_txts(month: str = None) -> list[str]:
                 for f in month_dir.glob("*.txt"):
                     result.append(f"{month_dir.name}/{f.name}")
         return result
+
+
+def append_to_archive(memory_id: str, new_content: str) -> bool:
+    """
+    追加内容到已有 archive TXT
+    
+    Args:
+        memory_id: 已有记忆的 ID
+        new_content: 要追加的内容
+    
+    Returns:
+        True if success, False if failed
+    """
+    # 找到文件：遍历所有月份
+    for month_dir in ARCHIVE_DIR.iterdir():
+        if not month_dir.is_dir():
+            continue
+        filepath = month_dir / f"{memory_id}.txt"
+        if filepath.exists():
+            # 读取现有内容
+            with open(filepath, 'r', encoding='utf-8') as f:
+                full_content = f.read()
+            
+            # 解析 front matter，追加内容
+            if full_content.startswith('---'):
+                parts = full_content.split('---', 2)
+                if len(parts) >= 3:
+                    front_matter = parts[1]
+                    existing_content = parts[2].strip()
+                    
+                    # 在现有内容后追加分隔线和新增内容
+                    updated_content = existing_content + "\n\n---\n\n" + new_content
+                    updated_full = f"---\n{front_matter}---\n\n{updated_content}"
+                else:
+                    updated_full = full_content + "\n\n---\n\n" + new_content
+            else:
+                updated_full = full_content + "\n\n---\n\n" + new_content
+            
+            # 写回
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(updated_full)
+            
+            return True
+    
+    return False

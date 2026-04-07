@@ -36,9 +36,9 @@ from lib.utils import (
     merge_tags_and_links,
     extract_summary
 )
-from lib.archive import write_archive_txt
-from lib.vector import write_vector
-from lib.hot_cache import add_to_hot_cache
+from lib.archive import write_archive_txt, append_to_archive
+from lib.vector import write_vector, delete_vector
+from lib.hot_cache import add_to_hot_cache, get_by_session_id, update_hot_cache_entry
 from lib.links import update_links_index
 
 
@@ -90,18 +90,25 @@ def store(
         {
             "memory_id": "uuid",
             "archive_path": "archive/.../xxx.txt",
-            "status": {
-                "archive": "ok",
-                "vector": "ok",
-                "hot_cache": "ok",
-                "links": "ok"
-            }
+            "status": {...},
+            "mode": "new" | "update"
         }
     """
     start_time = time.time()
     
-    # 生成 memory_id
-    memory_id = generate_memory_id()
+    # 检查是否需要增量更新
+    existing_memory = None
+    mode = "new"
+    
+    if session_id:
+        existing_memory = get_by_session_id(session_id)
+        if existing_memory:
+            mode = "update"
+            memory_id = existing_memory["memory_id"]
+    
+    # 如果没有已有记忆，生成新 memory_id
+    if not existing_memory:
+        memory_id = generate_memory_id()
     
     # 提取 links
     extracted_links = extract_links(content)
@@ -120,54 +127,112 @@ def store(
         "links": "ok"
     }
     
-    # Step 1: 写 archive TXT
-    try:
-        archive_path, title = write_archive_txt(
+    if mode == "update":
+        # 增量更新模式
+        try:
+            # Step 1: 追加到 archive TXT
+            if not append_to_archive(memory_id, content):
+                status["archive"] = "failed: append failed"
+            
+            # Step 2: 重新写入向量库（删除旧向量，重新写入）
+            # 获取 archive_path
+            archive_path = existing_memory.get("archive_path", "")
+            if archive_path:
+                # 删除旧向量
+                delete_vector(memory_id)
+                # 重新写入（用合并后的内容）
+                # 读取完整内容
+                from lib.archive import read_archive_txt
+                full_record = read_archive_txt(archive_path)
+                full_content = full_record.get("content", "") if full_record else ""
+                merged_content = full_content + "\n\n---\n\n" + content
+                
+                if not write_vector(
+                    memory_id=memory_id,
+                    archive_path=archive_path,
+                    content=merged_content,
+                    tags=tags,
+                    links=links,
+                    source=source,
+                    session_id=session_id
+                ):
+                    status["vector"] = "failed"
+            
+            # Step 3: 更新热缓存
+            if not update_hot_cache_entry(memory_id, content, tags, links):
+                status["hot_cache"] = "failed: update failed"
+            
+            # Step 4: 更新 links（追加新 links）
+            # 读取现有 links，合并
+            from lib.links import read_links_index
+            existing_links = read_links_index()
+            current_links = existing_links.get(memory_id, [])
+            # 合并去重
+            merged_links = list(set(current_links + links))
+            if not update_links_index(links=merged_links, memory_id=memory_id):
+                status["links"] = "failed"
+                
+        except Exception as e:
+            status["archive"] = f"failed: {e}"
+            duration_ms = int((time.time() - start_time) * 1000)
+            log_store_result(memory_id, source, status, duration_ms)
+            return {
+                "memory_id": memory_id,
+                "archive_path": existing_memory.get("archive_path") if existing_memory else None,
+                "status": status,
+                "mode": mode
+            }
+    else:
+        # 新建模式（原有逻辑）
+        # Step 1: 写 archive TXT
+        try:
+            archive_path, title = write_archive_txt(
+                memory_id=memory_id,
+                content=content,
+                tags=tags,
+                links=links,
+                source=source,
+                session_id=session_id
+            )
+        except Exception as e:
+            status["archive"] = f"failed: {e}"
+            # archive 失败是核心失败，直接返回
+            duration_ms = int((time.time() - start_time) * 1000)
+            log_store_result(memory_id, source, status, duration_ms)
+            return {
+                "memory_id": memory_id,
+                "archive_path": None,
+                "status": status,
+                "mode": mode
+            }
+        
+        # Step 2: 写向量库
+        if not write_vector(
             memory_id=memory_id,
+            archive_path=archive_path,
             content=content,
             tags=tags,
             links=links,
             source=source,
             session_id=session_id
-        )
-    except Exception as e:
-        status["archive"] = f"failed: {e}"
-        # archive 失败是核心失败，直接返回
-        duration_ms = int((time.time() - start_time) * 1000)
-        log_store_result(memory_id, source, status, duration_ms)
-        return {
-            "memory_id": memory_id,
-            "archive_path": None,
-            "status": status
-        }
-    
-    # Step 2: 写向量库
-    if not write_vector(
-        memory_id=memory_id,
-        archive_path=archive_path,
-        content=content,
-        tags=tags,
-        links=links,
-        source=source,
-        session_id=session_id
-    ):
-        status["vector"] = "failed"
-    
-    # Step 3: 写热缓存
-    if not add_to_hot_cache(
-        memory_id=memory_id,
-        archive_path=archive_path,
-        summary=summary,
-        tags=tags,
-        links=links,
-        source=source,
-        session_id=session_id
-    ):
-        status["hot_cache"] = "failed"
-    
-    # Step 4: 写 links 索引
-    if not update_links_index(links=links, memory_id=memory_id):
-        status["links"] = "failed"
+        ):
+            status["vector"] = "failed"
+        
+        # Step 3: 写热缓存
+        if not add_to_hot_cache(
+            memory_id=memory_id,
+            archive_path=archive_path,
+            summary=summary,
+            tags=tags,
+            links=links,
+            source=source,
+            session_id=session_id
+        ):
+            status["hot_cache"] = "failed"
+        
+        # Step 4: 写 links 索引
+        if not update_links_index(links=links, memory_id=memory_id):
+            status["links"] = "failed"
     
     # 计算耗时
     duration_ms = int((time.time() - start_time) * 1000)
@@ -175,10 +240,13 @@ def store(
     # 记录日志
     log_store_result(memory_id, source, status, duration_ms)
     
+    archive_path = existing_memory.get("archive_path") if mode == "update" else archive_path if mode == "new" else None
+    
     return {
         "memory_id": memory_id,
         "archive_path": archive_path,
-        "status": status
+        "status": status,
+        "mode": mode
     }
 
 

@@ -94,3 +94,45 @@ def list_hot_cache(limit: int = None) -> list[dict]:
     if limit:
         return memories[:limit]
     return memories
+
+
+def get_by_session_id(session_id: str) -> dict:
+    """根据 session_id 查询热缓存"""
+    if not session_id:
+        return None
+    cache = read_hot_cache()
+    for entry in cache.get("memories", []):
+        if entry.get("session_id") == session_id:
+            return entry
+    return None
+
+
+def update_hot_cache_entry(memory_id: str, new_content: str = None, new_tags: list = None, new_links: list = None) -> bool:
+    """更新热缓存条目"""
+    try:
+        cache = read_hot_cache()
+        
+        for entry in cache.get("memories", []):
+            if entry.get("memory_id") == memory_id:
+                # 更新时间
+                entry["timestamp"] = get_utc_timestamp()
+                
+                # 可选：更新 summary
+                if new_content:
+                    from .utils import extract_summary
+                    entry["summary"] = extract_summary(new_content)
+                
+                # 可选：更新 tags
+                if new_tags is not None:
+                    entry["tags"] = new_tags
+                
+                # 可选：更新 links
+                if new_links is not None:
+                    entry["links"] = new_links
+                
+                return write_hot_cache(cache)
+        
+        return False
+    except Exception as e:
+        print(f"ERROR: hot cache update failed: {e}", file=sys.stderr)
+        return False

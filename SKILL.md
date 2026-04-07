@@ -76,6 +76,11 @@ python3 ~/.qclaw/skills/memoria/scripts/store.py \
   --type hot \
   --content "日常琐事" \
   --tags "偏好,爱好"
+
+# 方式3：增量更新（同一 session 追加内容）
+python3 ~/.qclaw/skills/memoria/scripts/store.py \
+  --content "追加的内容" \
+  --session-id "当前会话ID"
 ```
 
 **写入流程（四步独立）：**
@@ -83,6 +88,11 @@ python3 ~/.qclaw/skills/memoria/scripts/store.py \
 2. 向量库 → 语义索引
 3. 热缓存 → 最近50条
 4. links.json → 双向链接索引
+
+**增量更新规则：**
+- 同一 session-id 多次"记一下" → 追加到已有记忆（而不是新建）
+- 不同 session-id → 新增独立记忆
+- 返回结果中 `mode: "update"` 表示增量更新，`mode: "new"` 表示新建
 
 ---
 
@@ -142,11 +152,27 @@ python3 ~/.qclaw/skills/memoria/scripts/auto_archive.py
 
 | 脚本 | 作用 |
 |------|------|
-| `store.py` | 统一写入入口（热缓存/冷存储/向量/链接） |
+| `store.py` | 统一写入入口（热缓存/冷存储/向量/链接），支持增量更新 |
 | `recall.py` | 检索入口（热缓存/向量搜索/标签匹配） |
 | `auto_archive.py` | Session 冷备份（每天 23:30） |
 | `rebuild.py` | 重建索引（运维用） |
 | `lib/` | 公共模块（archive/vector/hot_cache/links） |
+
+---
+
+## 增量更新
+
+**规则**：同一 session-id 多次"记一下" → 追加到已有记忆，而不是新建。
+
+```bash
+# 增量更新（同一 session 追加内容）
+python3 ~/.qclaw/skills/memoria/scripts/store.py \
+  --content "追加内容" \
+  --tags "标签" \
+  --session-id "当前会话ID"
+```
+
+返回结果中 `mode: "update"` 表示增量更新，`mode: "new"` 表示新建。
 
 ---
 

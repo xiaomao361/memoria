@@ -330,14 +330,14 @@ python3 scripts/store.py \
 - [x] TXT 格式定稿
 - [x] 向量库 metadata 设计
 - [x] 主动触发判断标准
-- [ ] store() 脚本实现
-- [ ] 与 Clara 对话流程集成
+- [x] store() 脚本实现
+- [x] 与 Clara 对话流程集成
 
 ### 后续迭代
-- [ ] cron 自动触发实现
-- [ ] 增量更新实现（相似度阈值 + 追加逻辑）
-- [ ] rebuild 命令实现
-- [ ] 配置文件设计
+- [x] cron 自动触发实现
+- [x] 增量更新实现（session-id 判断 + 追加逻辑）
+- [x] rebuild 命令实现
+- [x] 配置文件设计
 
 ---
 
