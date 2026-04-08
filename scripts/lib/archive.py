@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from .config import ARCHIVE_DIR
+from .config import ARCHIVE_DIR, PRIVATE_ARCHIVE_DIR
 from .utils import get_utc_timestamp, extract_title
 
 
@@ -16,10 +16,14 @@ def write_archive_txt(
     tags: list[str],
     links: list[str],
     source: str,
-    session_id: str = None
+    session_id: str = None,
+    private: bool = False
 ) -> tuple[str, str]:
     """
     写入 archive TXT 文件
+    
+    Args:
+        private: 是否写入私密区
     
     Returns:
         (archive_path, title)
@@ -32,9 +36,12 @@ def write_archive_txt(
     # 提取标题
     title = extract_title(content)
     
+    # 选择目录
+    base_dir = PRIVATE_ARCHIVE_DIR if private else ARCHIVE_DIR
+    
     # 按月归档
     dt = datetime.now(timezone.utc)
-    month_dir = ARCHIVE_DIR / f"{dt.year}-{dt.month:02d}"
+    month_dir = base_dir / f"{dt.year}-{dt.month:02d}"
     month_dir.mkdir(parents=True, exist_ok=True)
     
     # 文件名：{memory_id}.txt
@@ -49,6 +56,7 @@ source: {source}
 tags: {json.dumps(tags, ensure_ascii=False)}
 links: {json.dumps(links, ensure_ascii=False)}
 session_id: {session_id or ''}
+private: {str(private).lower()}
 version: 1
 ---
 
@@ -60,8 +68,10 @@ version: 1
     with open(filepath, 'w', encoding='utf-8') as f:
         f.write(full_content)
     
-    # 返回相对路径
+    # 返回相对路径（私密区加前缀标识）
     archive_path = f"{dt.year}-{dt.month:02d}/{filename}"
+    if private:
+        archive_path = f"private/{archive_path}"
     return archive_path, title
 
 
@@ -73,7 +83,7 @@ def read_archive_txt(archive_path: str) -> dict:
     旧格式：# 注释头
     
     Args:
-        archive_path: 相对路径，如 "2026-04/xxx.txt"
+        archive_path: 相对路径，如 "2026-04/xxx.txt" 或 "private/2026-04/xxx.txt"
     
     Returns:
         {
@@ -87,7 +97,13 @@ def read_archive_txt(archive_path: str) -> dict:
             "content": "正文内容"
         }
     """
-    filepath = ARCHIVE_DIR / archive_path
+    # 判断是否私密区
+    is_private = archive_path.startswith("private/")
+    if is_private:
+        archive_path = archive_path[8:]  # 去掉 "private/" 前缀
+        filepath = PRIVATE_ARCHIVE_DIR / archive_path
+    else:
+        filepath = ARCHIVE_DIR / archive_path
     
     if not filepath.exists():
         return None
@@ -202,43 +218,51 @@ def _parse_old_format(full_content: str, archive_path: str) -> dict:
     return metadata
 
 
-def list_archive_txts(month: str = None) -> list[str]:
+def list_archive_txts(month: str = None, private: bool = False) -> list[str]:
     """
     列出 archive TXT 文件
     
     Args:
         month: 可选，指定月份，如 "2026-04"
+        private: 是否列出私密区
     
     Returns:
         相对路径列表
     """
+    base_dir = PRIVATE_ARCHIVE_DIR if private else ARCHIVE_DIR
+    
     if month:
-        month_dir = ARCHIVE_DIR / month
+        month_dir = base_dir / month
         if not month_dir.exists():
             return []
-        return [f"{month}/{f.name}" for f in month_dir.glob("*.txt")]
+        prefix = "private/" if private else ""
+        return [f"{prefix}{month}/{f.name}" for f in month_dir.glob("*.txt")]
     else:
         result = []
-        for month_dir in ARCHIVE_DIR.iterdir():
+        for month_dir in base_dir.iterdir():
             if month_dir.is_dir():
+                prefix = "private/" if private else ""
                 for f in month_dir.glob("*.txt"):
-                    result.append(f"{month_dir.name}/{f.name}")
+                    result.append(f"{prefix}{month_dir.name}/{f.name}")
         return result
 
 
-def append_to_archive(memory_id: str, new_content: str) -> bool:
+def append_to_archive(memory_id: str, new_content: str, private: bool = False) -> bool:
     """
     追加内容到已有 archive TXT
     
     Args:
         memory_id: 已有记忆的 ID
         new_content: 要追加的内容
+        private: 是否在私密区查找
     
     Returns:
         True if success, False if failed
     """
+    base_dir = PRIVATE_ARCHIVE_DIR if private else ARCHIVE_DIR
+    
     # 找到文件：遍历所有月份
-    for month_dir in ARCHIVE_DIR.iterdir():
+    for month_dir in base_dir.iterdir():
         if not month_dir.is_dir():
             continue
         filepath = month_dir / f"{memory_id}.txt"

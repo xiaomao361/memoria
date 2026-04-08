@@ -4,20 +4,23 @@
 
 import sys
 
-from .config import CHROMA_DB_PATH, COLLECTION_NAME, EMBEDDING_MAX_CHARS
+from .config import CHROMA_DB_PATH, COLLECTION_NAME, PRIVATE_CHROMA_DB_PATH, PRIVATE_COLLECTION_NAME, EMBEDDING_MAX_CHARS
 from .utils import get_utc_timestamp, truncate_for_embedding
 
 
-def get_collection():
+def get_collection(private: bool = False):
     """获取 ChromaDB collection"""
     try:
         import chromadb
     except ImportError:
         raise ImportError("chromadb not installed")
     
-    client = chromadb.PersistentClient(path=str(CHROMA_DB_PATH))
+    db_path = PRIVATE_CHROMA_DB_PATH if private else CHROMA_DB_PATH
+    collection_name = PRIVATE_COLLECTION_NAME if private else COLLECTION_NAME
+    
+    client = chromadb.PersistentClient(path=str(db_path))
     collection = client.get_or_create_collection(
-        name=COLLECTION_NAME,
+        name=collection_name,
         metadata={"hnsw:space": "cosine"}
     )
     return collection
@@ -30,16 +33,20 @@ def write_vector(
     tags: list[str],
     links: list[str],
     source: str,
-    session_id: str = None
+    session_id: str = None,
+    private: bool = False
 ) -> bool:
     """
     写入向量库
+    
+    Args:
+        private: 是否写入私密向量库
     
     Returns:
         True if success, False if failed
     """
     try:
-        collection = get_collection()
+        collection = get_collection(private=private)
         
         # 准备 embedding 输入（截断）
         embedding_text = truncate_for_embedding(content, EMBEDDING_MAX_CHARS)
@@ -52,7 +59,8 @@ def write_vector(
             "source": source,
             "tags": ",".join(tags),
             "links": ",".join(links),
-            "session_id": session_id or ""
+            "session_id": session_id or "",
+            "private": str(private).lower()
         }
         
         # 写入向量库
@@ -68,9 +76,12 @@ def write_vector(
         return False
 
 
-def search_vector(query: str, limit: int = 5) -> list[dict]:
+def search_vector(query: str, limit: int = 5, private: bool = False) -> list[dict]:
     """
     向量搜索
+    
+    Args:
+        private: 是否搜索私密向量库
     
     Returns:
         [
@@ -84,7 +95,7 @@ def search_vector(query: str, limit: int = 5) -> list[dict]:
         ]
     """
     try:
-        collection = get_collection()
+        collection = get_collection(private=private)
         
         results = collection.query(
             query_texts=[query],
@@ -115,10 +126,10 @@ def search_vector(query: str, limit: int = 5) -> list[dict]:
         return []
 
 
-def delete_vector(memory_id: str) -> bool:
+def delete_vector(memory_id: str, private: bool = False) -> bool:
     """删除向量"""
     try:
-        collection = get_collection()
+        collection = get_collection(private=private)
         collection.delete(ids=[memory_id])
         return True
     except Exception as e:

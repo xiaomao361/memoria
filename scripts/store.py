@@ -5,6 +5,7 @@ Memoria 统一写入入口 store()
 用法:
     python3 store.py --content "..." --tags "tag1,tag2" --source manual
     python3 store.py --content "..." --tags "tag1" --source proactive --session-id "xxx"
+    python3 store.py --content "..." --private  # 写入私密区
 
 返回:
     {
@@ -13,9 +14,10 @@ Memoria 统一写入入口 store()
         "status": {
             "archive": "ok",
             "vector": "ok",
-            "hot_cache": "ok",
+            "hot_cache": "ok",  # 私密区为 "skipped"
             "links": "ok"
-        }
+        },
+        "private": false
     }
 """
 
@@ -36,17 +38,18 @@ from lib.utils import (
     merge_tags_and_links,
     extract_summary
 )
-from lib.archive import write_archive_txt, append_to_archive
+from lib.archive import write_archive_txt, append_to_archive, read_archive_txt
 from lib.vector import write_vector, delete_vector
 from lib.hot_cache import add_to_hot_cache, get_by_session_id, update_hot_cache_entry
-from lib.links import update_links_index
+from lib.links import update_links_index, read_links_index
 
 
 def log_store_result(
     memory_id: str,
     source: str,
     status: dict,
-    duration_ms: int
+    duration_ms: int,
+    private: bool = False
 ):
     """记录 store 日志"""
     try:
@@ -57,7 +60,8 @@ def log_store_result(
             "memory_id": memory_id,
             "source": source,
             "status": status,
-            "duration_ms": duration_ms
+            "duration_ms": duration_ms,
+            "private": private
         }
         
         # 按日轮转
@@ -75,7 +79,8 @@ def store(
     content: str,
     pre_tags: list[str] = None,
     source: str = "manual",
-    session_id: str = None
+    session_id: str = None,
+    private: bool = False
 ) -> dict:
     """
     统一写入入口
@@ -85,22 +90,24 @@ def store(
         pre_tags: 预置标签
         source: manual | proactive
         session_id: 可选，关联的 session
+        private: 是否写入私密区
     
     Returns:
         {
             "memory_id": "uuid",
             "archive_path": "archive/.../xxx.txt",
             "status": {...},
-            "mode": "new" | "update"
+            "mode": "new" | "update",
+            "private": bool
         }
     """
     start_time = time.time()
     
-    # 检查是否需要增量更新
+    # 检查是否需要增量更新（私密区不走增量更新）
     existing_memory = None
     mode = "new"
     
-    if session_id:
+    if session_id and not private:
         existing_memory = get_by_session_id(session_id)
         if existing_memory:
             mode = "update"
@@ -123,26 +130,21 @@ def store(
     status = {
         "archive": "ok",
         "vector": "ok",
-        "hot_cache": "ok",
+        "hot_cache": "skipped" if private else "ok",
         "links": "ok"
     }
     
     if mode == "update":
-        # 增量更新模式
+        # 增量更新模式（仅日常区）
         try:
             # Step 1: 追加到 archive TXT
-            if not append_to_archive(memory_id, content):
+            if not append_to_archive(memory_id, content, private=False):
                 status["archive"] = "failed: append failed"
             
             # Step 2: 重新写入向量库（删除旧向量，重新写入）
-            # 获取 archive_path
             archive_path = existing_memory.get("archive_path", "")
             if archive_path:
-                # 删除旧向量
-                delete_vector(memory_id)
-                # 重新写入（用合并后的内容）
-                # 读取完整内容
-                from lib.archive import read_archive_txt
+                delete_vector(memory_id, private=False)
                 full_record = read_archive_txt(archive_path)
                 full_content = full_record.get("content", "") if full_record else ""
                 merged_content = full_content + "\n\n---\n\n" + content
@@ -154,7 +156,8 @@ def store(
                     tags=tags,
                     links=links,
                     source=source,
-                    session_id=session_id
+                    session_id=session_id,
+                    private=False
                 ):
                     status["vector"] = "failed"
             
@@ -163,47 +166,46 @@ def store(
                 status["hot_cache"] = "failed: update failed"
             
             # Step 4: 更新 links（追加新 links）
-            # 读取现有 links，合并
-            from lib.links import read_links_index
-            existing_links = read_links_index()
+            existing_links = read_links_index(private=False)
             current_links = existing_links.get(memory_id, [])
-            # 合并去重
             merged_links = list(set(current_links + links))
-            if not update_links_index(links=merged_links, memory_id=memory_id):
+            if not update_links_index(links=merged_links, memory_id=memory_id, private=False):
                 status["links"] = "failed"
                 
         except Exception as e:
             status["archive"] = f"failed: {e}"
             duration_ms = int((time.time() - start_time) * 1000)
-            log_store_result(memory_id, source, status, duration_ms)
+            log_store_result(memory_id, source, status, duration_ms, private=False)
             return {
                 "memory_id": memory_id,
                 "archive_path": existing_memory.get("archive_path") if existing_memory else None,
                 "status": status,
-                "mode": mode
+                "mode": mode,
+                "private": False
             }
     else:
-        # 新建模式（原有逻辑）
-        # Step 1: 写 archive TXT
+        # 新建模式
         try:
+            # Step 1: 写 archive TXT
             archive_path, title = write_archive_txt(
                 memory_id=memory_id,
                 content=content,
                 tags=tags,
                 links=links,
                 source=source,
-                session_id=session_id
+                session_id=session_id,
+                private=private
             )
         except Exception as e:
             status["archive"] = f"failed: {e}"
-            # archive 失败是核心失败，直接返回
             duration_ms = int((time.time() - start_time) * 1000)
-            log_store_result(memory_id, source, status, duration_ms)
+            log_store_result(memory_id, source, status, duration_ms, private=private)
             return {
                 "memory_id": memory_id,
                 "archive_path": None,
                 "status": status,
-                "mode": mode
+                "mode": mode,
+                "private": private
             }
         
         # Step 2: 写向量库
@@ -214,39 +216,47 @@ def store(
             tags=tags,
             links=links,
             source=source,
-            session_id=session_id
+            session_id=session_id,
+            private=private
         ):
             status["vector"] = "failed"
         
-        # Step 3: 写热缓存
-        if not add_to_hot_cache(
-            memory_id=memory_id,
-            archive_path=archive_path,
-            summary=summary,
-            tags=tags,
-            links=links,
-            source=source,
-            session_id=session_id
-        ):
-            status["hot_cache"] = "failed"
+        # Step 3: 写热缓存（私密区跳过）
+        if not private:
+            if not add_to_hot_cache(
+                memory_id=memory_id,
+                archive_path=archive_path,
+                summary=summary,
+                tags=tags,
+                links=links,
+                source=source,
+                session_id=session_id
+            ):
+                status["hot_cache"] = "failed"
         
-        # Step 4: 写 links 索引
-        if not update_links_index(links=links, memory_id=memory_id):
+        # Step 4: 写 links 索引（tags 也加入索引）
+        all_links = list(set(links + tags))
+        if not update_links_index(links=all_links, memory_id=memory_id, private=private):
             status["links"] = "failed"
     
     # 计算耗时
     duration_ms = int((time.time() - start_time) * 1000)
     
     # 记录日志
-    log_store_result(memory_id, source, status, duration_ms)
+    log_store_result(memory_id, source, status, duration_ms, private=private)
     
-    archive_path = existing_memory.get("archive_path") if mode == "update" else archive_path if mode == "new" else None
+    final_archive_path = (
+        existing_memory.get("archive_path") if mode == "update" 
+        else archive_path if mode == "new" 
+        else None
+    )
     
     return {
         "memory_id": memory_id,
-        "archive_path": archive_path,
+        "archive_path": final_archive_path,
         "status": status,
-        "mode": mode
+        "mode": mode,
+        "private": private
     }
 
 
@@ -256,6 +266,7 @@ def main():
     parser.add_argument("--tags", default="", help="预置标签，逗号分隔")
     parser.add_argument("--source", default="manual", choices=["manual", "proactive"], help="触发来源")
     parser.add_argument("--session-id", default=None, help="关联的 session ID")
+    parser.add_argument("--private", action="store_true", help="写入私密区")
     
     args = parser.parse_args()
     
@@ -267,7 +278,8 @@ def main():
         content=args.content,
         pre_tags=pre_tags,
         source=args.source,
-        session_id=args.session_id
+        session_id=args.session_id,
+        private=args.private
     )
     
     # 输出结果
