@@ -4,23 +4,10 @@ Memoria Lite 统一写入入口 store()
 
 三步写入（去掉向量层）：
     Step 1: 写入 Archive TXT
-    Step 2: 更新热缓存
+    Step 2: 更新热缓存（私密区跳过）
     Step 3: 更新 links 索引
 
-用法:
-    python3 store.py --content "..." --tags "tag1,tag2" --source manual
-    python3 store.py --content "..." --tags "tag1" --source proactive --session-id "xxx"
-
-返回:
-    {
-        "memory_id": "uuid",
-        "archive_path": "archive/2026-04/xxx.txt",
-        "status": {
-            "archive": "ok",
-            "hot_cache": "ok",
-            "links": "ok"
-        }
-    }
+支持私密区：--private 参数
 """
 
 import argparse
@@ -32,12 +19,11 @@ from pathlib import Path
 # 添加 lib 目录到路径
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
-from lib.config import LOGS_DIR, ensure_directories
+from lib.config import LOGS_DIR, ensure_directories, ensure_private_directories
 from lib.utils import (
     generate_memory_id,
     get_utc_timestamp,
     extract_links,
-    merge_tags_and_links,
     extract_summary
 )
 from lib.archive import write_archive_txt
@@ -49,7 +35,8 @@ def log_store_result(
     memory_id: str,
     source: str,
     status: dict,
-    duration_ms: int
+    duration_ms: int,
+    private_zone: bool = False
 ):
     """记录 store 日志"""
     try:
@@ -60,10 +47,10 @@ def log_store_result(
             "memory_id": memory_id,
             "source": source,
             "status": status,
-            "duration_ms": duration_ms
+            "duration_ms": duration_ms,
+            "private_zone": private_zone
         }
         
-        # 按日轮转
         from datetime import datetime, timezone
         dt = datetime.now(timezone.utc)
         log_file = LOGS_DIR / f"store-{dt.year}-{dt.month:02d}-{dt.day:02d}.log"
@@ -78,7 +65,8 @@ def store(
     content: str,
     pre_tags: list[str] = None,
     source: str = "manual",
-    session_id: str = None
+    session_id: str = None,
+    private: bool = False
 ) -> dict:
     """
     统一写入入口（三步，不含向量）
@@ -88,6 +76,7 @@ def store(
         pre_tags: 预置标签
         source: manual | proactive
         session_id: 可选，关联的 session
+        private: 是否写入私密区
     
     Returns:
         {
@@ -97,7 +86,7 @@ def store(
             "links": [...],
             "status": {
                 "archive": "ok",
-                "hot_cache": "ok",
+                "hot_cache": "ok" | "skipped",
                 "links": "ok"
             }
         }
@@ -105,16 +94,20 @@ def store(
     start_time = time.time()
     
     # 确保目录存在
-    ensure_directories()
+    if private:
+        ensure_private_directories()
+    else:
+        ensure_directories()
     
     # 生成 memory_id
     memory_id = generate_memory_id()
     
-    # 提取 links
+    # 提取 links（从内容中提取 [[xxx]]）
     extracted_links = extract_links(content)
     
-    # 合并 tags 和 links
-    tags, links = merge_tags_and_links(pre_tags, extracted_links)
+    # 合并 tags 和 links（tags 也加入 links 索引）
+    tags = pre_tags or []
+    links = list(set(extracted_links + tags))
     
     # 提取摘要
     summary = extract_summary(content)
@@ -122,7 +115,7 @@ def store(
     # 初始化状态
     status = {
         "archive": "ok",
-        "hot_cache": "ok",
+        "hot_cache": "skipped" if private else "ok",
         "links": "ok"
     }
     
@@ -134,12 +127,13 @@ def store(
             tags=tags,
             links=links,
             source=source,
-            session_id=session_id
+            session_id=session_id,
+            private_zone=private
         )
     except Exception as e:
         status["archive"] = f"failed: {e}"
         duration_ms = int((time.time() - start_time) * 1000)
-        log_store_result(memory_id, source, status, duration_ms)
+        log_store_result(memory_id, source, status, duration_ms, private)
         return {
             "memory_id": memory_id,
             "archive_path": None,
@@ -148,27 +142,28 @@ def store(
             "status": status
         }
     
-    # Step 2: 写热缓存
-    if not add_to_hot_cache(
-        memory_id=memory_id,
-        archive_path=archive_path,
-        summary=summary,
-        tags=tags,
-        links=links,
-        source=source,
-        session_id=session_id
-    ):
-        status["hot_cache"] = "failed"
+    # Step 2: 写热缓存（私密区跳过）
+    if not private:
+        if not add_to_hot_cache(
+            memory_id=memory_id,
+            archive_path=archive_path,
+            summary=summary,
+            tags=tags,
+            links=links,
+            source=source,
+            session_id=session_id
+        ):
+            status["hot_cache"] = "failed"
     
     # Step 3: 写 links 索引
-    if not update_links_index(links=links, memory_id=memory_id):
+    if not update_links_index(links=links, memory_id=memory_id, private_zone=private):
         status["links"] = "failed"
     
     # 计算耗时
     duration_ms = int((time.time() - start_time) * 1000)
     
     # 记录日志
-    log_store_result(memory_id, source, status, duration_ms)
+    log_store_result(memory_id, source, status, duration_ms, private)
     
     return {
         "memory_id": memory_id,
@@ -185,6 +180,7 @@ def main():
     parser.add_argument("--tags", default="", help="预置标签，逗号分隔")
     parser.add_argument("--source", default="manual", choices=["manual", "proactive"], help="触发来源")
     parser.add_argument("--session-id", default=None, help="关联的 session ID")
+    parser.add_argument("--private", action="store_true", help="写入私密区")
     
     args = parser.parse_args()
     
@@ -196,7 +192,8 @@ def main():
         content=args.content,
         pre_tags=pre_tags,
         source=args.source,
-        session_id=args.session_id
+        session_id=args.session_id,
+        private=args.private
     )
     
     # 输出结果

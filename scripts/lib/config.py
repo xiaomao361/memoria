@@ -1,6 +1,6 @@
 """
 Memoria Lite 配置模块
-去掉向量相关配置，零外部依赖
+零外部依赖，支持私密区
 """
 
 from pathlib import Path
@@ -17,31 +17,23 @@ def _resolve_memoria_root() -> Path:
     if env_root:
         return Path(env_root).expanduser().resolve()
     
-    # 2. 用户配置（~/.qclaw/memoria/config.json）
-    config_path = Path.home() / ".qclaw" / "memoria" / "config.json"
-    if config_path.exists():
-        import json
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                config = json.load(f)
-            root = config.get("root")
-            if root:
-                return Path(root).expanduser().resolve()
-        except Exception:
-            pass
-    
-    # 3. 默认值
+    # 2. 默认值
     return (Path.home() / ".qclaw" / "memoria").resolve()
 
 
 # 根目录
 MEMORIA_ROOT = _resolve_memoria_root()
 
-# 子目录和文件
+# 公开区路径
 ARCHIVE_DIR = MEMORIA_ROOT / "archive"
 HOT_CACHE_PATH = MEMORIA_ROOT / "memoria.json"
 LINKS_PATH = MEMORIA_ROOT / "links.json"
 LOGS_DIR = MEMORIA_ROOT / "logs"
+
+# 私密区路径
+PRIVATE_ROOT = MEMORIA_ROOT / "private"
+PRIVATE_ARCHIVE_DIR = PRIVATE_ROOT / "memories"
+PRIVATE_LINKS_PATH = PRIVATE_ROOT / "links.json"
 
 # =============================================================================
 # 热缓存配置
@@ -51,11 +43,12 @@ LOGS_DIR = MEMORIA_ROOT / "logs"
 HOT_CACHE_CAPACITY = int(os.environ.get("MEMORIA_HOT_CACHE_LIMIT", 200))
 
 # =============================================================================
-# 向量搜索配置（保留但默认关闭，仅用于 Full 版本兼容）
+# 向量搜索配置（Lite 默认关闭）
 # =============================================================================
 
-# 向量库路径（Lite 版本不使用，但 Full 版本需要）
+# 向量库路径（Lite 版本不使用）
 CHROMA_DB_PATH = MEMORIA_ROOT / "chroma_db"
+PRIVATE_CHROMA_DB_PATH = PRIVATE_ROOT / "chroma_db"
 
 # 向量搜索是否启用（Lite 版本默认为 False）
 VECTOR_ENABLED = False
@@ -81,18 +74,21 @@ def ensure_directories():
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def enable_vector():
-    """启用向量搜索（切换到 Full 模式）"""
-    global VECTOR_ENABLED
-    VECTOR_ENABLED = True
-
-
-def disable_vector():
-    """禁用向量搜索（切换到 Lite 模式）"""
-    global VECTOR_ENABLED
-    VECTOR_ENABLED = False
+def ensure_private_directories():
+    """确保私密区目录存在"""
+    PRIVATE_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def is_vector_enabled() -> bool:
     """检查向量搜索是否启用"""
     return VECTOR_ENABLED
+
+
+def get_archive_dir(private_zone: bool = False) -> Path:
+    """获取归档目录"""
+    return PRIVATE_ARCHIVE_DIR if private_zone else ARCHIVE_DIR
+
+
+def get_links_path(private_zone: bool = False) -> Path:
+    """获取链接索引路径"""
+    return PRIVATE_LINKS_PATH if private_zone else LINKS_PATH

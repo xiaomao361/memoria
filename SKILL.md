@@ -1,108 +1,182 @@
 ---
-name: memoria
+name: memoria-lite
 description: |
-  Clara 的记忆增强插件。跨会话记忆持久化与智能召回。
-  当用户提到"记住"、"这个重要"、"之前说过"、"你还记得吗"，
-  或需要持久化跨会话信息时使用。
+  Memoria Lite — 轻量级 AI Agent 记忆系统。
+  零外部依赖，五分钟上手。
+  当用户提到"记住"、"这个重要"、"之前说过"、"你还记得吗"时使用。
 metadata:
   openclaw:
     emoji: "🧠"
 ---
 
-# Memoria — 记忆系统 v4.0
+# Memoria Lite — 轻量级记忆系统 v4.0
 
-> 跨会话记忆，向量检索，双向链接，永不遗忘。
-
----
-
-## 架构
-
-```
-~/.qclaw/agents/main/sessions/*.jsonl   → 原始对话（OpenClaw 管理）
-                    ↓
-auto_archive.py    → 每天 23:30 冷备份（三层同时写入）
-                    ↓
-┌──────────────────────────────────────────┐
-│  ~/.qclaw/memoria/                       │
-│  ├── memoria.json   热缓存（最近50条）    │
-│  ├── chroma_db/    向量索引（语义搜索）   │
-│  ├── archive/      冷备份（全量历史）     │
-│  ├── links.json    双向链接索引           │
-│  └── sessions_backup/  Session 备份      │
-└──────────────────────────────────────────┘
-                    ↓
-recall.py / store.py  → 写入/检索入口
-```
-
-**存储位置：**
-- 代码：`~/.qclaw/skills/memoria/scripts/`
-- 数据：`~/.qclaw/memoria/`
+> 跨会话记忆，标签检索，双向链接，永不遗忘。
+> **零外部依赖** — 不需要 Ollama、ChromaDB 或任何向量服务。
 
 ---
 
-## ⚠️ 启动触发（强制）
+## 与 Full 版本对比
+
+| 特性 | Lite | Full |
+|------|------|------|
+| 向量语义搜索 | ❌ | ✅ bge-m3 + ChromaDB |
+| 检索方式 | 标签 + 关键词 | 语义相似度 + 标签 |
+| 外部依赖 | **零依赖** | Ollama + ChromaDB |
+| 安装复杂度 | 极简 | 中等 |
+| 适用场景 | 日常记忆、新手入门 | 语义搜索、高级用户 |
+| 私密记忆区 | ✅ | ✅ |
+
+**数据完全兼容**：Lite 和 Full 共用相同的 Archive TXT、热缓存和 links.json 格式，可以随时互转。
+
+---
+
+## 安装
+
+### 方式1：作为 OpenClaw Skill 安装
+
+```bash
+# 克隆到 skills 目录
+cd ~/.qclaw/skills
+git clone -b feature/lite-no-vector git@github.com:xiaomao361/memoria.git memoria-lite
+
+# 确保 scripts 可执行
+chmod +x memoria-lite/scripts/*.py
+```
+
+### 方式2：独立使用
+
+```bash
+# 克隆到任意位置
+git clone -b feature/lite-no-vector git@github.com:xiaomao361/memoria.git ~/memoria-lite
+
+# 设置环境变量（可选）
+export MEMORIA_ROOT=~/memoria-data
+```
+
+---
+
+## 初始化
+
+首次使用需要创建数据目录：
+
+```bash
+python3 ~/.qclaw/skills/memoria-lite/scripts/store.py \
+  --content "# 初始化\n\n## 摘要\nMemoria Lite 初始化" \
+  --tags "初始化"
+```
+
+这会创建：
+
+```
+~/.qclaw/memoria/
+├── archive/          # 记忆归档（按月分目录）
+│   └── 2026-04/
+├── memoria.json      # 热缓存（最近 200 条）
+├── links.json        # 双向链接索引
+└── private/          # 私密区（使用 --private 时创建）
+    ├── memories/
+    └── links.json
+```
+
+---
+
+## 启动触发（强制）
 
 **新会话第一条消息时，必须立即执行：**
+
 ```bash
-python3 ~/.qclaw/skills/memoria/scripts/recall.py --hot-cache --simple
+python3 ~/.qclaw/skills/memoria-lite/scripts/recall.py --hot-cache --simple
 ```
 
 **用户提到"之前/上次/还记得"时，立即执行：**
+
 ```bash
-python3 ~/.qclaw/skills/memoria/scripts/recall.py --search "关键词"
+python3 ~/.qclaw/skills/memoria-lite/scripts/recall.py --search "关键词"
 ```
 
 ---
 
-## 写入（store）
+## 写入记忆（store）
 
-**触发方式：**
-
-| 用户说法 | 内容类型 | 调用方式 |
-|----------|----------|----------|
-| 「记一下」+ 日常琐事/偏好 | 偏好、趣事 | store.py（自动判断写热缓存） |
-| 「记一下」+ 项目/技术/决策 | 方案、待办、约定 | store.py（自动判断写冷存储） |
-| 「单独记」「全量记」 | 重要内容 | store.py --content |
+### 基本用法
 
 ```bash
-# 方式1：自动判断写入（根据内容类型自动选择热缓存/冷存储）
-python3 ~/.qclaw/skills/memoria/scripts/store.py \
-  --content "要记录的内容" \
-  --tags "tag1,tag2" \
-  --links "链接1,链接2"
+# 写入公开记忆
+python3 ~/.qclaw/skills/memoria-lite/scripts/store.py \
+  --content "# 用户偏好\n\n## 摘要\n用户喜欢简洁的回答" \
+  --tags "用户偏好,沟通风格"
 
-# 方式2：手动指定写入热缓存
-python3 ~/.qclaw/skills/memoria/scripts/store.py \
-  --type hot \
-  --content "日常琐事" \
-  --tags "偏好,爱好"
+# 写入私密记忆
+python3 ~/.qclaw/skills/memoria-lite/scripts/store.py \
+  --content "# 私密内容\n\n## 摘要\n..." \
+  --tags "私密" \
+  --private
 ```
 
-**写入流程（四步独立）：**
-1. archive TXT → 冷备份
-2. 向量库 → 语义索引
-3. 热缓存 → 最近50条
-4. links.json → 双向链接索引
+### 触发方式
+
+| 用户说法 | 调用方式 |
+|----------|----------|
+| 「记一下」+ 日常琐事 | `store.py --content` |
+| 「记一下」+ 项目/技术 | `store.py --content --tags` |
+| 「私密记一下」 | `store.py --content --private` |
+
+### 写入流程
+
+```
+store(content, tags, private=False)
+    │
+    ├─ Step 1: 写入 Archive TXT（公开区或私密区）
+    ├─ Step 2: 更新热缓存（私密区跳过）
+    └─ Step 3: 更新 links 索引
+```
+
+**私密区特性：**
+- 不写入热缓存
+- 独立存储在 `private/` 目录
+- 独立 links.json 索引
+- 搜索时需加 `--private` 参数
 
 ---
 
-## 检索（recall）
+## 检索记忆（recall）
+
+### 基本用法
 
 ```bash
-# 热缓存（最快，新会话默认）
-python3 ~/.qclaw/skills/memoria/scripts/recall.py --hot-cache --simple
+# 热缓存快速加载（启动时用）
+python3 ~/.qclaw/skills/memoria-lite/scripts/recall.py --hot-cache --simple
 
-# 语义搜索（向量 + 链接自动合并）
-python3 ~/.qclaw/skills/memoria/scripts/recall.py --search "关键词"
+# 关键词搜索
+python3 ~/.qclaw/skills/memoria-lite/scripts/recall.py --search "用户偏好"
 
-# 深度搜索（自动获取 archive 原文）
-python3 ~/.qclaw/skills/memoria/scripts/recall.py --search "关键词" --with-content
+# 关键词搜索 + 返回完整内容
+python3 ~/.qclaw/skills/memoria-lite/scripts/recall.py --search "用户偏好" --with-content
 
 # 标签精确匹配
-python3 ~/.qclaw/skills/memoria/scripts/recall.py --tags "Memoria,技术"
+python3 ~/.qclaw/skills/memoria-lite/scripts/recall.py --tags "Memoria,技术"
 
 # 最近 N 天
-python3 ~/.qclaw/skills/memoria/scripts/recall.py --days 7
+python3 ~/.qclaw/skills/memoria-lite/scripts/recall.py --days 7
+
+# 搜索私密区
+python3 ~/.qclaw/skills/memoria-lite/scripts/recall.py --search "关键词" --private
+
+# 直接指定 memory_id
+python3 ~/.qclaw/skills/memoria-lite/scripts/recall.py --memory-id "xxx"
+```
+
+### 检索模式
+
+```
+recall(query)
+    │
+    ├─ --hot-cache: 加载热缓存（最快）
+    ├─ --search: 关键词搜索（热缓存优先 → Archive 回退）
+    ├─ --tags: 标签精确匹配（查 links.json）
+    ├─ --days: 按时间筛选
+    └─ --memory-id: 直接定位
 ```
 
 ---
@@ -111,50 +185,81 @@ python3 ~/.qclaw/skills/memoria/scripts/recall.py --days 7
 
 **使用方式：**
 1. 内容中写 `[[链接名]]`（自动提取）
-2. 调用时传 `--links "链接1,链接2"`（手动传入）
-3. 两者会合并去重
+2. 调用时传 `--tags "标签1,标签2"`（同时加入 links 索引）
 
 **链接类型：**
 - 项目名：Kraken、Memoria、ThreadVibe
-- 技术名：Redis、ChromaDB、WebSocket
-- 人物：Clara、毛仔、Vera
+- 技术名：Redis、WebSocket
+- 人物：Clara、毛仔
 
-**索引文件：** `~/.qclaw/memoria/links.json`
+**索引文件：**
+- 公开区：`~/.qclaw/memoria/links.json`
+- 私密区：`~/.qclaw/memoria/private/links.json`
 
 ---
 
-## 运维
+## 运维脚本
+
+| 脚本 | 作用 |
+|------|------|
+| `store.py` | 统一写入入口 |
+| `recall.py` | 检索入口 |
+| `rebuild.py` | 重建索引（运维用） |
+| `migrate.py` | Lite ↔ Full 迁移 |
+| `auto_archive.py` | Session 冷备份 |
+
+---
+
+## 与 Full 版本互转
+
+### Lite → Full（添加向量搜索）
 
 ```bash
-# 重建索引（增量模式，默认不删除现有数据）
-python3 ~/.qclaw/skills/memoria/scripts/rebuild.py
+# 1. 安装依赖
+pip3 install chromadb
 
-# 重建索引（强制清空）
+# 2. 启动 Ollama + bge-m3
+ollama pull bge-m3
+
+# 3. 重建向量索引
 python3 ~/.qclaw/skills/memoria/scripts/rebuild.py --force
+```
 
-# Session 冷备份（cron 每天 23:30 自动执行）
-python3 ~/.qclaw/skills/memoria/scripts/auto_archive.py
+### Full → Lite（降级为轻量版）
+
+```bash
+# 1. 删除向量库
+rm -rf ~/.qclaw/memoria/chroma_db
+
+# 2. 切换到 Lite 分支
+cd ~/.qclaw/skills/memoria
+git checkout feature/lite-no-vector
 ```
 
 ---
 
-## 脚本说明
+## 架构
 
-| 脚本 | 作用 |
-|------|------|
-| `store.py` | 统一写入入口（热缓存/冷存储/向量/链接） |
-| `recall.py` | 检索入口（热缓存/向量搜索/标签匹配） |
-| `auto_archive.py` | Session 冷备份（每天 23:30） |
-| `rebuild.py` | 重建索引（运维用） |
-| `lib/` | 公共模块（archive/vector/hot_cache/links） |
-
----
-
-## 依赖
-
-- **Ollama**：本地 LLM
-  - `bge-m3` — 向量化（只用这个，不调用3b模型）
-- **ChromaDB**：向量数据库（`pip3 install chromadb`）
+```
+┌─────────────────────────────────────────────────────┐
+│                      CLI / Skill                     │
+│           store()              recall()               │
+└─────────────────────────────────────────────────────┘
+                          │
+            ┌─────────────┼─────────────┐
+            ▼             ▼             ▼
+    ┌────────────┐ ┌────────────┐ ┌────────────┐
+    │  热缓存    │ │ links索引  │ │  Archive   │
+    │memoria.json│ │ links.json│ │   TXT      │
+    │ (200条)   │ │ (双向链接) │ │ (最终来源) │
+    └────────────┘ └────────────┘ └────────────┘
+            │
+            ▼
+    ┌────────────┐
+    │  私密区    │
+    │ private/  │
+    └────────────┘
+```
 
 ---
 
@@ -163,14 +268,17 @@ python3 ~/.qclaw/skills/memoria/scripts/auto_archive.py
 ```
 当前数据量：
 - Archive: 94 条
-- 向量库: 94 条
 - 热缓存: 94 条
 - Links: 49 个
-- Sessions备份: 8 个
+- 私密区: 2 条
 ```
 
 ---
 
-## 废弃脚本
+## License
 
-`scripts/_deprecated/` 目录下有旧版本脚本，暂时保留备份。
+MIT License
+
+---
+
+*Memoria Lite — 让 AI Agent 记住一切，零门槛。*

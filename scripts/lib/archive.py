@@ -1,12 +1,14 @@
 """
 Archive TXT 读写操作
+支持公开区和私密区
 """
 
 import json
 import re
 from pathlib import Path
+from datetime import datetime, timezone
 
-from .config import ARCHIVE_DIR
+from .config import ARCHIVE_DIR, PRIVATE_ARCHIVE_DIR, get_archive_dir
 from .utils import get_utc_timestamp, extract_title
 
 
@@ -16,25 +18,30 @@ def write_archive_txt(
     tags: list[str],
     links: list[str],
     source: str,
-    session_id: str = None
+    session_id: str = None,
+    private_zone: bool = False
 ) -> tuple[str, str]:
     """
     写入 archive TXT 文件
     
+    Args:
+        private_zone: 是否写入私密区
+    
     Returns:
         (archive_path, title)
     """
-    from datetime import datetime, timezone
-    
     # 生成时间戳
     created = get_utc_timestamp()
     
     # 提取标题
     title = extract_title(content)
     
+    # 选择目录
+    archive_dir = get_archive_dir(private_zone)
+    
     # 按月归档
     dt = datetime.now(timezone.utc)
-    month_dir = ARCHIVE_DIR / f"{dt.year}-{dt.month:02d}"
+    month_dir = archive_dir / f"{dt.year}-{dt.month:02d}"
     month_dir.mkdir(parents=True, exist_ok=True)
     
     # 文件名：{memory_id}.txt
@@ -65,15 +72,13 @@ version: 1
     return archive_path, title
 
 
-def read_archive_txt(archive_path: str) -> dict:
+def read_archive_txt(archive_path: str, private_zone: bool = False) -> dict:
     """
     读取 archive TXT 文件（兼容新旧格式）
     
-    新格式：YAML front matter
-    旧格式：# 注释头
-    
     Args:
         archive_path: 相对路径，如 "2026-04/xxx.txt"
+        private_zone: 是否从私密区读取
     
     Returns:
         {
@@ -87,7 +92,8 @@ def read_archive_txt(archive_path: str) -> dict:
             "content": "正文内容"
         }
     """
-    filepath = ARCHIVE_DIR / archive_path
+    archive_dir = get_archive_dir(private_zone)
+    filepath = archive_dir / archive_path
     
     if not filepath.exists():
         return None
@@ -138,17 +144,7 @@ def _parse_new_format(full_content: str) -> dict:
 
 
 def _parse_old_format(full_content: str, archive_path: str) -> dict:
-    """
-    解析旧格式（# 注释头）
-    
-    旧格式示例：
-    # Clara
-    # 创建时间: 2026-04-04T05:00:17.614619+00:00
-    # 记忆ID: 661ac0a0-48a2-4c74-b659-ab134b1eff19
-    # 链接: clara, 毛仔, claracore
-    
-    Clara很重要！...
-    """
+    """解析旧格式（# 注释头）"""
     lines = full_content.strip().split('\n')
     
     metadata = {
@@ -161,7 +157,6 @@ def _parse_old_format(full_content: str, archive_path: str) -> dict:
     
     for line in lines:
         if line.startswith('# '):
-            # 解析注释行
             comment = line[2:].strip()
             
             if comment.startswith('创建时间:'):
@@ -173,26 +168,20 @@ def _parse_old_format(full_content: str, archive_path: str) -> dict:
                 metadata['links'] = [l.strip() for l in links_str.split(',') if l.strip()]
                 metadata['tags'] = metadata['links'].copy()
             elif ':' not in comment:
-                # 标题行（第一个没有冒号的注释）
                 if 'title' not in metadata:
                     metadata['title'] = comment
         else:
             content_lines.append(line)
     
-    # 如果没有 memory_id，从文件名提取
     if 'memory_id' not in metadata or not metadata['memory_id']:
-        # 文件名格式：{title}-{memory_id}.txt
         filename = Path(archive_path).stem
-        # 尝试提取 UUID
         uuid_match = re.search(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', filename)
         if uuid_match:
             metadata['memory_id'] = uuid_match.group(1)
         else:
-            # 生成新的 memory_id
             from .utils import generate_memory_id
             metadata['memory_id'] = generate_memory_id()
     
-    # 确保 tags 和 links 存在
     if 'tags' not in metadata:
         metadata['tags'] = []
     if 'links' not in metadata:
@@ -202,27 +191,56 @@ def _parse_old_format(full_content: str, archive_path: str) -> dict:
     return metadata
 
 
-def list_archive_txts(month: str = None) -> list[str]:
+def list_archive_txts(month: str = None, private_zone: bool = False) -> list[str]:
     """
     列出 archive TXT 文件
     
     Args:
         month: 可选，指定月份，如 "2026-04"
+        private_zone: 是否列出私密区
     
     Returns:
         相对路径列表
     """
+    archive_dir = get_archive_dir(private_zone)
+    
     if month:
-        month_dir = ARCHIVE_DIR / month
+        month_dir = archive_dir / month
         if not month_dir.exists():
             return []
         return [f"{month}/{f.name}" for f in month_dir.glob("*.txt")]
     else:
         result = []
-        if not ARCHIVE_DIR.exists():
+        if not archive_dir.exists():
             return result
-        for month_dir in ARCHIVE_DIR.iterdir():
+        for month_dir in archive_dir.iterdir():
             if month_dir.is_dir():
                 for f in month_dir.glob("*.txt"):
                     result.append(f"{month_dir.name}/{f.name}")
         return result
+
+
+def append_to_archive(
+    memory_id: str,
+    content: str,
+    private_zone: bool = False
+) -> bool:
+    """
+    追加内容到已有 archive 文件
+    
+    用于增量更新场景
+    """
+    archive_dir = get_archive_dir(private_zone)
+    
+    # 查找文件
+    for month_dir in archive_dir.iterdir():
+        if not month_dir.is_dir():
+            continue
+        for f in month_dir.glob("*.txt"):
+            if memory_id in f.name:
+                # 追加内容
+                with open(f, 'a', encoding='utf-8') as file:
+                    file.write(f"\n\n---\n\n{content}")
+                return True
+    
+    return False
