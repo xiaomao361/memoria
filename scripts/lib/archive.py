@@ -100,13 +100,19 @@ def read_archive_txt(archive_path: str) -> dict:
     # 判断是否私密区
     is_private = archive_path.startswith("private/")
     if is_private:
-        archive_path = archive_path[8:]  # 去掉 "private/" 前缀
-        filepath = PRIVATE_ARCHIVE_DIR / archive_path
+        # write_archive_txt 返回格式：private/memories/{year-month}/{uuid}.txt
+        # PRIVATE_ARCHIVE_DIR = ~/.qclaw/memoria/private/memories
+        # 拼接后得到正确路径：~/.qclaw/memoria/private/memories/{year-month}/{uuid}.txt
+        archive_path_clean = archive_path.replace("private/memories/", "")
+        filepath = PRIVATE_ARCHIVE_DIR / archive_path_clean
+        
+        # 兼容旧格式（private/{year-month}/{uuid}.txt，没有 memories/）
+        if not filepath.exists():
+            legacy_filepath = PRIVATE_ARCHIVE_DIR / archive_path.replace("private/", "")
+            if legacy_filepath.exists():
+                filepath = legacy_filepath
     else:
         filepath = ARCHIVE_DIR / archive_path
-    
-    if not filepath.exists():
-        return None
     
     with open(filepath, 'r', encoding='utf-8') as f:
         full_content = f.read()
@@ -227,21 +233,22 @@ def list_archive_txts(month: str = None, private: bool = False) -> list[str]:
         private: 是否列出私密区
     
     Returns:
-        相对路径列表
+        相对路径列表（格式与 write_archive_txt 返回值一致）
     """
     base_dir = PRIVATE_ARCHIVE_DIR if private else ARCHIVE_DIR
+    
+    # 私密区路径前缀：write_archive_txt 返回 "private/memories/{year-month}/"
+    prefix = "private/memories/" if private else ""
     
     if month:
         month_dir = base_dir / month
         if not month_dir.exists():
             return []
-        prefix = "private/" if private else ""
         return [f"{prefix}{month}/{f.name}" for f in month_dir.glob("*.txt")]
     else:
         result = []
         for month_dir in base_dir.iterdir():
-            if month_dir.is_dir():
-                prefix = "private/" if private else ""
+            if month_dir.is_dir() and month_dir.name not in ['.DS_Store', 'chroma_db']:
                 for f in month_dir.glob("*.txt"):
                     result.append(f"{prefix}{month_dir.name}/{f.name}")
         return result
