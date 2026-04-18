@@ -9,9 +9,10 @@ metadata:
     emoji: "🧠"
 ---
 
-# Memoria — 记忆系统 v4.0
+# Memoria — 记忆系统 v4.3
 
 > 跨会话记忆，向量检索，双向链接，永不遗忘。
+> 新增：Dream 层自动整理 + 沉睡机制
 
 ---
 
@@ -113,6 +114,9 @@ python3 ~/.qclaw/skills/memoria/scripts/recall.py --tags "Memoria,技术"
 
 # 最近 N 天
 python3 ~/.qclaw/skills/memoria/scripts/recall.py --days 7
+
+# 包含沉睡记忆（默认只搜索活跃记忆）
+python3 ~/.qclaw/skills/memoria/scripts/recall.py --search "关键词" --include-dormant
 ```
 
 ---
@@ -167,7 +171,8 @@ python3 ~/.qclaw/skills/memoria/scripts/auto_archive.py
 | 脚本 | 作用 |
 |------|------|
 | `store.py` | 统一写入入口（热缓存/冷存储/向量/链接），支持增量更新 |
-| `recall.py` | 检索入口（热缓存/向量搜索/标签匹配） |
+| `recall.py` | 检索入口（热缓存/向量搜索/标签匹配/沉睡召回） |
+| `dream.py` | Dream 层自动整理（扫描/修复/沉睡/梦境生成） |
 | `auto_archive.py` | Session 冷备份（每天 23:30） |
 | `rebuild.py` | 重建索引（运维用） |
 | `lib/` | 公共模块（archive/vector/hot_cache/links） |
@@ -202,12 +207,71 @@ python3 ~/.qclaw/skills/memoria/scripts/store.py \
 
 ```
 当前数据量：
-- Archive: 94 条
-- 向量库: 94 条
-- 热缓存: 94 条
-- Links: 49 个
+- Archive (公开): 167 条
+- Archive (私密): 38 条
+- 向量库 (公开): 167 条
+- 向量库 (私密): 38 条
+- 热缓存: 200 条（容量上限）
+- Links (公开): 167 实体 / 206 标签
+- Links (私密): 38 实体
 - Sessions备份: 8 个
+- DREAMS.md: 每日自动更新
 ```
+
+---
+
+## Dream 层（自动整理）
+
+Memoria v4.3 引入三层自动整理机制，解决"数据逐渐混乱"的问题：
+
+| 层级 | 触发 | 功能 |
+|------|------|------|
+| **Extract** | 每次对话 | 即时写入记忆 |
+| **Dream** | 每天 02:00 | 扫描问题 + 自动修复（静默运行） |
+| **Refine** | 每周日 03:00 | 提炼重要内容到 MEMORY.md |
+| **Demote** | 每周六 04:00 | 沉睡机制（降权长期未访问的记忆） |
+
+**Dream 层执行命令：**
+
+```bash
+# 仅扫描，生成报告（不执行）
+python3 ~/.qclaw/skills/memoria/scripts/dream.py --scan
+
+# 扫描 + 执行安全修复
+python3 ~/.qclaw/skills/memoria/scripts/dream.py --execute
+
+# 完整执行（扫描 + 修复 + 生成梦境叙事）
+python3 ~/.qclaw/skills/memoria/scripts/dream.py --full
+```
+
+**报告位置：** `~/.qclaw/memoria/DREAMS.md`
+
+---
+
+## 沉睡机制
+
+超过 30 天未被检索的记忆，自动进入"沉睡"状态：
+
+- 向量索引删除（节省空间）
+- 文件仍保留在 archive/ 中
+- 热缓存中标记为 `dormant: true`
+
+**召回沉睡记忆：**
+
+```bash
+# 搜索时包含沉睡记忆
+python3 ~/.qclaw/skills/memoria/scripts/recall.py --query "关键词" --include-dormant
+
+# 预演降权（查看哪些记忆将被沉睡）
+python3 ~/.qclaw/skills/memoria/scripts/dream.py --demote
+
+# 执行降权
+python3 ~/.qclaw/skills/memoria/scripts/dream.py --demote --execute
+```
+
+**保护标签（自动清理时跳过）：**
+- `长期项目`, `核心任务`, `重要`, `keep`
+- 手动添加保护标签：记重要内容时加 `--tags "长期项目"`
 
 ---
 
