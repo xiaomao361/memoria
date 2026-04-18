@@ -136,3 +136,19 @@ def update_hot_cache_entry(memory_id: str, new_content: str = None, new_tags: li
     except Exception as e:
         print(f"ERROR: hot cache update failed: {e}", file=sys.stderr)
         return False
+
+
+def update_last_recalled(memory_id: str) -> bool:
+    """更新记忆的最后访问时间"""
+    try:
+        cache = read_hot_cache()
+        
+        for entry in cache.get("memories", []):
+            if entry.get("memory_id") == memory_id:
+                entry["last_recalled"] = get_utc_timestamp()
+                return write_hot_cache(cache)
+        
+        return False
+    except Exception as e:
+        print(f"ERROR: update last_recalled failed: {e}", file=sys.stderr)
+        return False

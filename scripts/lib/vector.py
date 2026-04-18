@@ -127,11 +127,11 @@ def search_vector(query: str, limit: int = 5, private: bool = False) -> list[dic
 
 
 def delete_vector(memory_id: str, private: bool = False) -> bool:
-    """删除向量"""
+    """删除向量（记忆降权时调用）"""
     try:
         collection = get_collection(private=private)
         collection.delete(ids=[memory_id])
         return True
     except Exception as e:
-        print(f"ERROR: vector delete failed: {e}", file=sys.stderr)
+        print(f"ERROR: vector delete failed for {memory_id}: {e}", file=sys.stderr)
         return False

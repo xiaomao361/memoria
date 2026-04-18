@@ -37,18 +37,115 @@ Memoria 统一读取入口 recall()
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # 添加 lib 目录到路径
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
 from lib.archive import read_archive_txt, list_archive_txts
-from lib.vector import search_vector
-from lib.hot_cache import list_hot_cache, get_from_hot_cache
+from lib.vector import search_vector, write_vector, delete_vector
+from lib.hot_cache import list_hot_cache, get_from_hot_cache, update_last_recalled
 from lib.links import get_memories_by_links
+from lib.vector import search_vector, write_vector, delete_vector
 
 
-def recall_by_tags(tags: list[str], limit: int = 5, include_content: bool = False, private: bool = False) -> list[dict]:
+# ═══════════════════════════════════════════════════════════════════════
+# 辅助函数
+# ═══════════════════════════════════════════════════════════════════════
+
+def _filter_active_only(results: list[dict]) -> list[dict]:
+    """只返回活跃记忆，过滤掉 dormant"""
+    cache = list_hot_cache()
+    active_ids = {m.get("id") or m.get("memory_id") for m in cache if m.get("storage_type") != "dormant"}
+    
+    filtered = []
+    for r in results:
+        mid = r.get("memory_id")
+        # 如果在热缓存中且不是 dormant
+        if mid in active_ids:
+            filtered.append(r)
+    
+    return filtered
+
+
+def _reactivate_from_dormant(memory_id: str, summary: str, tags: list[str], links: list[str]) -> bool:
+    """
+    当 dormant 记忆被召回时，重新写入向量索引并恢复为活跃状态。
+    
+    1. 重新写入向量库（向量在降权时已删除，这里补写）
+    2. 更新热缓存中的 storage_type 为 active
+    3. 恢复 archive_path
+    """
+    from lib.hot_cache import read_hot_cache, write_hot_cache
+    from lib.archive import read_archive_txt
+    
+    # 1. 重新写入向量库（从 dormant archive 读取原文）
+    dormant_dir = Path.home() / ".qclaw" / "memoria" / "archive" / "dormant"
+    archive_path = dormant_dir / f"{memory_id}.txt"
+    if archive_path.exists():
+        archive_data = read_archive_txt(str(archive_path))
+        content = archive_data.get("content", summary)
+    else:
+        content = summary
+    
+    # 2. 写回向量库
+    write_vector(
+        memory_id=memory_id,
+        archive_path=f"archive/{memory_id}.txt",  # 恢复为正常路径
+        content=content,
+        tags=tags,
+        links=links,
+        source="reactivated",
+        private=False
+    )
+    
+    # 3. 更新热缓存：恢复为活跃
+    cache = read_hot_cache()
+    for m in cache.get("memories", []):
+        mid = m.get("id") or m.get("memory_id")
+        if mid == memory_id:
+            m["storage_type"] = "active"
+            m["last_recalled"] = datetime.now(timezone.utc).isoformat()
+            m["archive_path"] = f"archive/{memory_id}.txt"
+            break
+    write_hot_cache(cache)
+    
+    print(f"   ✓ 唤醒沉睡记忆: {memory_id}")
+    return True
+
+
+def _search_dormant(query: str, limit: int = 5) -> list[dict]:
+    """搜索沉睡记忆"""
+    dormant_dir = Path("~/.qclaw/memoria/archive/dormant").expanduser()
+    if not dormant_dir.exists():
+        return []
+    
+    results = []
+    for f in dormant_dir.glob("*.txt"):
+        # 简单全文匹配
+        try:
+            content = f.read_text(encoding="utf-8")
+            if query.lower() in content.lower():
+                results.append({
+                    "memory_id": f.stem,
+                    "summary": content[:100],
+                    "storage_type": "dormant"
+                })
+                if len(results) >= limit:
+                    break
+        except:
+            continue
+    
+    return results
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 主要查询函数
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def recall_by_tags(tags: list[str], limit: int = 5, include_content: bool = False, private: bool = False, include_dormant: bool = False) -> list[dict]:
     """
     通过标签搜索
     
@@ -57,6 +154,7 @@ def recall_by_tags(tags: list[str], limit: int = 5, include_content: bool = Fals
         limit: 返回条数
         include_content: 是否包含原文
         private: 是否搜索私密区
+        include_dormant: 是否包含沉睡记忆
     
     Returns:
         记忆列表
@@ -92,10 +190,14 @@ def recall_by_tags(tags: list[str], limit: int = 5, include_content: bool = Fals
         
         results.append(result)
     
+    # 过滤 dormant（除非明确要求包含）
+    if not include_dormant:
+        results = _filter_active_only(results)
+    
     return results
 
 
-def recall_by_query(query: str, limit: int = 5, include_content: bool = False, private: bool = False) -> list[dict]:
+def recall_by_query(query: str, limit: int = 5, include_content: bool = False, private: bool = False, include_dormant: bool = False) -> list[dict]:
     """
     通过语义搜索
     
@@ -104,12 +206,13 @@ def recall_by_query(query: str, limit: int = 5, include_content: bool = False, p
         limit: 返回条数
         include_content: 是否包含原文
         private: 是否搜索私密区
+        include_dormant: 是否包含沉睡记忆
     
     Returns:
         记忆列表
     """
     # 向量搜索
-    vector_results = search_vector(query, limit, private=private)
+    vector_results = search_vector(query, limit * 2, private=private)  # 多取一些，后面过滤
     
     if not vector_results:
         return []
@@ -131,7 +234,7 @@ def recall_by_query(query: str, limit: int = 5, include_content: bool = False, p
         
         # 如果需要原文
         if include_content:
-            archive_path = vr.get("archive_path")
+            archive_path = metadata.get("archive_path")
             if archive_path:
                 # 私密区需要加前缀
                 if private and not archive_path.startswith("private/"):
@@ -141,6 +244,21 @@ def recall_by_query(query: str, limit: int = 5, include_content: bool = False, p
                     result["content"] = archive_data.get("content")
         
         results.append(result)
+    
+    # 过滤 dormant（除非明确要求包含）
+    if not include_dormant:
+        results = _filter_active_only(results)
+    else:
+        # include_dormant=True：搜索沉睡层，并尝试唤醒命中的记忆
+        dormant_results = _search_dormant(query, limit)
+        for dr in dormant_results:
+            _reactivate_from_dormant(
+                dr.get('memory_id'),
+                dr.get('summary', ''),
+                dr.get('tags', []),
+                dr.get('links', [])
+            )
+        results.extend(dormant_results)
     
     return results
 
@@ -207,7 +325,8 @@ def recall(
     memory_id: str = None,
     limit: int = 5,
     include_content: bool = False,
-    private: bool = False
+    private: bool = False,
+    include_dormant: bool = False
 ) -> list[dict]:
     """
     统一读取入口
@@ -219,6 +338,7 @@ def recall(
         limit: 返回条数
         include_content: 是否包含原文
         private: 是否搜索私密区
+        include_dormant: 是否包含沉睡记忆
     
     Returns:
         记忆列表
@@ -226,16 +346,19 @@ def recall(
     # 优先级：memory_id > tags > query
     if memory_id:
         result = recall_by_memory_id(memory_id, include_content, private)
+        if result:
+            update_last_recalled(memory_id)
         return [result] if result else []
-    
+
     if tags:
-        return recall_by_tags(tags, limit, include_content, private)
-    
-    if query:
-        return recall_by_query(query, limit, include_content, private)
-    
-    # 都没有，返回空
-    return []
+        results = recall_by_tags(tags, limit, include_content, private)
+        for r in results:
+            update_last_recalled(r.get("memory_id"))
+        return results
+
+    # query=None 时也走通配符搜索（允许查询全部）
+    # 查询全部时传 include_dormant
+    return recall_by_query(query or "*", limit, include_content, private, include_dormant)
 
 
 def main():
@@ -250,6 +373,7 @@ def main():
     parser.add_argument("--limit", type=int, default=5, help="返回条数")
     parser.add_argument("--include-content", action="store_true", help="是否包含原文")
     parser.add_argument("--private", action="store_true", help="搜索私密区")
+    parser.add_argument("--include-dormant", action="store_true", help="包含沉睡记忆")
     
     # 启动加载模式
     parser.add_argument("--hot-cache", action="store_true", help="启动加载热缓存")
@@ -273,7 +397,8 @@ def main():
         memory_id=args.memory_id,
         limit=args.limit,
         include_content=args.include_content,
-        private=args.private
+        private=args.private,
+        include_dormant=args.include_dormant
     )
     
     # 输出结果

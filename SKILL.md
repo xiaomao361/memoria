@@ -129,18 +129,32 @@ python3 ~/.qclaw/skills/memoria/scripts/recall.py --days 7
 - 技术名：Redis、ChromaDB、WebSocket
 - 人物：Clara、毛仔、Vera
 
-**索引文件：** `~/.qclaw/memoria/links.json`
+**索引文件：**
+- `~/.qclaw/memoria/links.json` — 公开记忆索引（含权重、保护标签）
+- `~/.qclaw/memoria/private/links.json` — 隐私记忆索引
+
+**双向索引结构：**
+- `tags`: tag → [uuids]（哪些记忆关联这个标签）
+- `entities`: uuid → {tags, weight, last_linked}（每个记忆的详情）
+- 权重：每次关联标签时 weight +1，可查询热门记忆
+- 保护标签：带有"长期项目/核心任务/重要"等标签的记忆不会被自动清理
 
 ---
 
 ## 运维
 
 ```bash
-# 重建索引（增量模式，默认不删除现有数据）
-python3 ~/.qclaw/skills/memoria/scripts/rebuild.py
+# 重建索引（扫描 archive/ 和 private/memories/，自动重建完整索引）
+cd ~/.qclaw/skills/memoria/scripts && python3 -c "
+from lib.links import rebuild_index
+# 需手动调用重建逻辑
+"
 
-# 重建索引（强制清空）
-python3 ~/.qclaw/skills/memoria/scripts/rebuild.py --force
+# 自动清理过期待办（dry_run 预览）
+python3 -c "from lib.links import auto_cleanup_stale_todos; print(auto_cleanup_stale_todos(days=30, dry_run=True))"
+
+# 自动清理（实际执行）
+python3 -c "from lib.links import auto_cleanup_stale_todos; print(auto_cleanup_stale_todos(days=30, dry_run=False))"
 
 # Session 冷备份（cron 每天 23:30 自动执行）
 python3 ~/.qclaw/skills/memoria/scripts/auto_archive.py
