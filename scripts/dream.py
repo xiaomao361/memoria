@@ -125,10 +125,10 @@ def _scan_links() -> dict:
     p_links = json.loads(p_links_path.read_text(encoding="utf-8")) if p_links_path.exists() else {"uuids": [], "tags": {}, "entities": {}}
 
     return {
-        "public_uuids": len(links.get("uuids", [])),
+        "public_uuids": len(links.get("entities", {}).keys()),
         "public_tags": len(links.get("tags", {})),
         "public_entities": len(links.get("entities", {})),
-        "private_uuids": len(p_links.get("uuids", [])),
+        "private_uuids": len(p_links.get("entities", {}).keys()),
         "raw": links,
     }
 
@@ -237,7 +237,8 @@ def _analyze(result: dict) -> list[dict]:
     links = result.get("links", {}).get("raw", {})
     hot_entries = result.get("hot_cache", {}).get("entries", [])
     hot_ids = {e["memory_id"] for e in hot_entries if e.get("memory_id")}
-    link_ids = set(links.get("uuids", []))
+    # Bug修复：uuids 字段已废弃，改用 entities.keys()
+    link_ids = set(links.get("entities", {}).keys())
     missing = hot_ids - link_ids
     if missing:
         missing_previews = []
@@ -246,7 +247,7 @@ def _analyze(result: dict) -> list[dict]:
                 missing_previews.append(f"「{e['summary'][:40]}」")
         add(
             "info", "sync",
-            f"links.uuids 缺少 {len(missing)} 个热缓存 UUID",
+            f"links.entities 缺少 {len(missing)} 个热缓存 UUID",
             f"这些条目入库时未同步到 links 索引：{', '.join(missing_previews[:3])}",
             f"自动修复：将 {len(missing)} 个 UUID 追加到 links.uuids",
             auto_safe=True,  # 这是修复性操作，安全
@@ -288,20 +289,28 @@ def execute(result: dict, dry_run: bool = True) -> dict:
             executed.append(issue["id"])
 
         elif category == "sync" and issue["auto_safe"]:
-            # 自动修复：补全 links.uuids
+            # 自动修复：补全 links.entities
             links = result.get("links", {}).get("raw", {})
             hot_entries = result.get("hot_cache", {}).get("entries", [])
             hot_ids = {e["memory_id"] for e in hot_entries if e.get("memory_id")}
-            link_ids = set(links.get("uuids", []))
+            # Bug修复：uuids 字段已废弃，改用 entities.keys()
+            link_ids = set(links.get("entities", {}).keys())
             missing = hot_ids - link_ids
             if missing:
                 if dry_run:
-                    print(f"  [dry-run] links.uuids 将追加 {len(missing)} 个 UUID")
+                    print(f"  [dry-run] links.entities 将补全 {len(missing)} 个 UUID")
                 else:
-                    links["uuids"] = list(set(links["uuids"]) | missing)
+                    # 直接补全 entities（保持 tags 不变）
+                    for mid in missing:
+                        if mid not in links["entities"]:
+                            links["entities"][mid] = {
+                                "tags": [],
+                                "weight": 0,
+                                "last_linked": datetime.now(timezone.utc).isoformat()
+                            }
                     links_path = MEMORIA_ROOT / "links.json"
                     links_path.write_text(json.dumps(links, ensure_ascii=False, indent=2), encoding="utf-8")
-                    print(f"  ✅ links.uuids 已追加 {len(missing)} 个 UUID")
+                    print(f"  ✅ links.entities 已补全 {len(missing)} 个 UUID")
             executed.append(issue["id"])
 
         else:
@@ -749,8 +758,10 @@ def demote_stale_memories(scan_result: dict, days_threshold: int = 30, dry_run: 
             # 需要降权
             if not dry_run:
                 m["storage_type"] = "dormant"
-                # 移到 dormant 目录
-                _move_to_dormant(m)
+                # 移到 dormant 目录（私密属性由热缓存的 archive_path 判断）
+                # Bug① 修复：传递 private 参数
+                is_private = "private/" in (m.get("archive_path") or "")
+                _move_to_dormant(m, private=is_private)
             demoted.append({
                 "id": m.get("id"),
                 "summary": m.get("summary", "")[:50],
@@ -770,44 +781,48 @@ def demote_stale_memories(scan_result: dict, days_threshold: int = 30, dry_run: 
     }
 
 
-def _move_to_dormant(memory: dict):
-    """把记忆移到 dormant archive"""
+def _move_to_dormant(memory: dict, private: bool = False):
+    """
+    把记忆移到 dormant archive。
+    
+    Bug① 修复：
+    - 私密记忆使用独立的 dormant 目录（private/memories/archive/dormant/）
+    - 向量库删除时正确传递 private 属性
+    - archive_path 恢复路径时正确加 private/ 前缀
+    """
     from lib.archive import write_archive_txt
     
-    # 生成 dormant 目录路径
-    dormant_dir = MEMORIA_ROOT / "archive" / "dormant"
-    dormant_dir.mkdir(parents=True, exist_ok=True)
-    
-    # archive 文件名
     memory_id = memory.get("id", memory.get("memory_id", "unknown"))
+    
+    # Bug① 修复：私密记忆的 dormant 目录
+    if private:
+        dormant_dir = MEMORIA_ROOT / "private" / "memories" / "archive" / "dormant"
+    else:
+        dormant_dir = MEMORIA_ROOT / "archive" / "dormant"
+    
+    dormant_dir.mkdir(parents=True, exist_ok=True)
     archive_path = dormant_dir / f"{memory_id}.txt"
     
-    # 写入 dormant archive
-    content = f"""# Memory: {memory_id}
-tags: {', '.join(memory.get('tags', []))}
-created: {memory.get('timestamp')}
-last_recalled: {memory.get('last_recalled')}
-storage_type: dormant
----
-{memory.get('summary', '')}
-"""
+    # 写入 dormant archive（保持 private 属性）
     write_archive_txt(
         memory_id=memory_id,
         content=memory.get('summary', ''),
         tags=memory.get('tags', []),
         links=memory.get('links', []),
         source=memory.get('source', 'demote'),
-        private=False
+        private=private  # ← Bug① 修复：保持私密属性
     )
     
     # 更新 memory 中的 archive_path
-    memory["archive_path"] = f"dormant/{memory_id}.txt"
+    if private:
+        memory["archive_path"] = f"private/memories/archive/dormant/{memory_id}.txt"
+    else:
+        memory["archive_path"] = f"dormant/{memory_id}.txt"
 
-    # 删除向量索引（记忆降权后不再需要向量搜索）
-    memory_id = memory.get("id", memory.get("memory_id"))
-    deleted_vector = delete_vector(memory_id, private=False)
+    # Bug① 修复：正确传递 private 属性到向量库删除
+    deleted_vector = delete_vector(memory_id, private=private)
     if deleted_vector:
-        print(f"   ✓ 向量索引已清理: {memory_id}")
+        print(f"   ✓ 向量索引已清理: {memory_id} {'(私密)' if private else ''}")
 
 
 def update_last_recalled(memory_id: str):

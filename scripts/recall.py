@@ -36,9 +36,12 @@ Memoria 统一读取入口 recall()
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+UUID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 
 # 添加 lib 目录到路径
 sys.path.insert(0, str(Path(__file__).parent / "lib"))
@@ -47,95 +50,165 @@ from lib.archive import read_archive_txt, list_archive_txts
 from lib.vector import search_vector, write_vector, delete_vector
 from lib.hot_cache import list_hot_cache, get_from_hot_cache, update_last_recalled
 from lib.links import get_memories_by_links
-from lib.vector import search_vector, write_vector, delete_vector
 
 
 # ═══════════════════════════════════════════════════════════════════════
 # 辅助函数
 # ═══════════════════════════════════════════════════════════════════════
 
-def _filter_active_only(results: list[dict]) -> list[dict]:
-    """只返回活跃记忆，过滤掉 dormant"""
-    cache = list_hot_cache()
-    active_ids = {m.get("id") or m.get("memory_id") for m in cache if m.get("storage_type") != "dormant"}
+def _get_active_ids() -> set:
+    """
+    获取所有活跃记忆的 ID 集合。
+    
+    修复 Bug③：不再依赖热缓存（只有200条），而是扫描 archive 目录，
+    找出所有非 dormant 的记忆 ID。
+    
+    Bug根因：文件名格式为 "标题-uuid.txt"，不能直接用 .stem 提取，
+    必须用正则从文件名中找纯 UUID。
+    """
+    active_ids = set()
+    
+    for is_private in [False, True]:
+        for month_path in list_archive_txts(private=is_private):
+            parts = month_path.replace("\\", "/").split("/")
+            if parts[0] == "dormant":
+                continue  # dormant 不计入活跃
+            filename = parts[-1].replace(".txt", "")
+            # 用正则从文件名提取纯 UUID（文件名可能带标题前缀）
+            match = UUID_RE.search(filename)
+            if match:
+                active_ids.add(match.group())
+    
+    return active_ids
+
+
+def _filter_active_only(results: list[dict], private: bool = False) -> list[dict]:
+    """
+    只返回活跃记忆，过滤掉 dormant。
+    
+    Bug③ 修复：不再依赖热缓存白名单（200条上限会误杀活跃记忆），
+    改为扫描 archive 目录获取完整的活跃 ID 集合。
+    """
+    active_ids = _get_active_ids()
     
     filtered = []
     for r in results:
         mid = r.get("memory_id")
-        # 如果在热缓存中且不是 dormant
         if mid in active_ids:
             filtered.append(r)
+        # 如果不在 archive 中（热缓存残留），也保留（可能正在写入）
     
     return filtered
 
 
-def _reactivate_from_dormant(memory_id: str, summary: str, tags: list[str], links: list[str]) -> bool:
+def _reactivate_from_dormant(
+    memory_id: str,
+    summary: str,
+    tags: list[str],
+    links: list[str],
+    private: bool = False
+) -> bool:
     """
     当 dormant 记忆被召回时，重新写入向量索引并恢复为活跃状态。
     
-    1. 重新写入向量库（向量在降权时已删除，这里补写）
-    2. 更新热缓存中的 storage_type 为 active
-    3. 恢复 archive_path
+    Bug① 修复：
+    - dormant 目录根据 private 区分（私密记忆 → private/memories/archive/dormant/）
+    - 重新写回向量库时保持 private 属性
+    - archive_path 恢复为正常路径（加 private/ 前缀）
+    
+    Args:
+        memory_id: 记忆 ID
+        summary: 摘要
+        tags: 标签
+        links: 链接
+        private: 是否是私密记忆
+    
+    Returns:
+        True if success
     """
     from lib.hot_cache import read_hot_cache, write_hot_cache
     from lib.archive import read_archive_txt
     
-    # 1. 重新写入向量库（从 dormant archive 读取原文）
-    dormant_dir = Path.home() / ".qclaw" / "memoria" / "archive" / "dormant"
+    # 1. 确定 dormant 目录路径
+    if private:
+        dormant_dir = Path.home() / ".qclaw/memoria/private/memories/archive/dormant"
+    else:
+        dormant_dir = Path.home() / ".qclaw/memoria/archive/dormant"
+    
     archive_path = dormant_dir / f"{memory_id}.txt"
+    
+    # 2. 从 dormant archive 读取原文
     if archive_path.exists():
-        archive_data = read_archive_txt(str(archive_path))
-        content = archive_data.get("content", summary)
+        archive_data = read_archive_txt(
+            f"private/{dormant_dir.name}/{memory_id}.txt" if private 
+            else f"dormant/{memory_id}.txt"
+        )
+        content = archive_data.get("content", summary) if archive_data else summary
     else:
         content = summary
     
-    # 2. 写回向量库
+    # 3. 重新写回向量库（保持 private 属性）
+    if private:
+        restored_archive_path = f"private/{datetime.now(timezone.utc).strftime('%Y-%m')}/{memory_id}.txt"
+    else:
+        restored_archive_path = f"{datetime.now(timezone.utc).strftime('%Y-%m')}/{memory_id}.txt"
+    
     write_vector(
         memory_id=memory_id,
-        archive_path=f"archive/{memory_id}.txt",  # 恢复为正常路径
+        archive_path=restored_archive_path,
         content=content,
         tags=tags,
         links=links,
         source="reactivated",
-        private=False
+        private=private  # ← Bug① 修复：保持私密属性
     )
     
-    # 3. 更新热缓存：恢复为活跃
+    # 4. 更新热缓存：恢复为活跃
     cache = read_hot_cache()
     for m in cache.get("memories", []):
         mid = m.get("id") or m.get("memory_id")
         if mid == memory_id:
             m["storage_type"] = "active"
             m["last_recalled"] = datetime.now(timezone.utc).isoformat()
-            m["archive_path"] = f"archive/{memory_id}.txt"
+            m["archive_path"] = restored_archive_path
             break
     write_hot_cache(cache)
     
-    print(f"   ✓ 唤醒沉睡记忆: {memory_id}")
+    print(f"   ✓ 唤醒沉睡记忆: {memory_id} {'(私密)' if private else ''}")
     return True
 
 
-def _search_dormant(query: str, limit: int = 5) -> list[dict]:
-    """搜索沉睡记忆"""
-    dormant_dir = Path("~/.qclaw/memoria/archive/dormant").expanduser()
-    if not dormant_dir.exists():
-        return []
+def _search_dormant(query: str, limit: int = 5, private: bool = False) -> list[dict]:
+    """
+    搜索沉睡记忆。
     
+    支持公开和私密 dormant 目录。
+    """
     results = []
-    for f in dormant_dir.glob("*.txt"):
-        # 简单全文匹配
-        try:
-            content = f.read_text(encoding="utf-8")
-            if query.lower() in content.lower():
-                results.append({
-                    "memory_id": f.stem,
-                    "summary": content[:100],
-                    "storage_type": "dormant"
-                })
-                if len(results) >= limit:
-                    break
-        except:
+    
+    for is_private in ([False, True] if not private else [True]):
+        if is_private:
+            dormant_dir = Path.home() / ".qclaw/memoria/private/memories/archive/dormant"
+        else:
+            dormant_dir = Path.home() / ".qclaw/memoria/archive/dormant"
+        
+        if not dormant_dir.exists():
             continue
+        
+        for f in dormant_dir.glob("*.txt"):
+            try:
+                content = f.read_text(encoding="utf-8")
+                if query.lower() in content.lower():
+                    results.append({
+                        "memory_id": f.stem,
+                        "summary": content[:100],
+                        "storage_type": "dormant",
+                        "private": is_private
+                    })
+                    if len(results) >= limit:
+                        return results
+            except:
+                continue
     
     return results
 
@@ -145,7 +218,13 @@ def _search_dormant(query: str, limit: int = 5) -> list[dict]:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-def recall_by_tags(tags: list[str], limit: int = 5, include_content: bool = False, private: bool = False, include_dormant: bool = False) -> list[dict]:
+def recall_by_tags(
+    tags: list[str],
+    limit: int = 5,
+    include_content: bool = False,
+    private: bool = False,
+    include_dormant: bool = False
+) -> list[dict]:
     """
     通过标签搜索
     
@@ -192,14 +271,22 @@ def recall_by_tags(tags: list[str], limit: int = 5, include_content: bool = Fals
     
     # 过滤 dormant（除非明确要求包含）
     if not include_dormant:
-        results = _filter_active_only(results)
+        results = _filter_active_only(results, private=private)
     
     return results
 
 
-def recall_by_query(query: str, limit: int = 5, include_content: bool = False, private: bool = False, include_dormant: bool = False) -> list[dict]:
+def recall_by_query(
+    query: str,
+    limit: int = 5,
+    include_content: bool = False,
+    private: bool = False,
+    include_dormant: bool = False
+) -> list[dict]:
     """
     通过语义搜索
+    
+    Bug④ 修复：私密向量库不存在时，给出明确提示并降级搜索。
     
     Args:
         query: 查询文本
@@ -211,61 +298,88 @@ def recall_by_query(query: str, limit: int = 5, include_content: bool = False, p
     Returns:
         记忆列表
     """
-    # 向量搜索
-    vector_results = search_vector(query, limit * 2, private=private)  # 多取一些，后面过滤
-    
-    if not vector_results:
-        return []
-    
-    # 构建结果
     results = []
-    for vr in vector_results:
-        metadata = vr.get("metadata", {})
-        result = {
-            "memory_id": vr.get("memory_id"),
-            "summary": metadata.get("tags", "").split(",")[0] if metadata.get("tags") else "",
-            "tags": metadata.get("tags", "").split(",") if metadata.get("tags") else [],
-            "links": metadata.get("links", "").split(",") if metadata.get("links") else [],
-            "timestamp": metadata.get("timestamp"),
-            "source": metadata.get("source"),
-            "score": vr.get("score"),
-            "private": private
-        }
-        
-        # 如果需要原文
-        if include_content:
-            archive_path = metadata.get("archive_path")
-            if archive_path:
-                # 私密区需要加前缀
-                if private and not archive_path.startswith("private/"):
-                    archive_path = f"private/{archive_path}"
-                archive_data = read_archive_txt(archive_path)
-                if archive_data:
-                    result["content"] = archive_data.get("content")
-        
-        results.append(result)
+    
+    # 向量搜索
+    vector_results = search_vector(query, limit * 2, private=private)
+    
+    if not vector_results and private:
+        # Bug④ 修复：私密向量库为空时，给出明确提示
+        print("   ⚠️ 私密向量库为空，使用 archive 全文搜索替代", file=sys.stderr)
+        # 降级：直接扫描私密 archive 全文
+        archive_paths = list_archive_txts(private=True)
+        for ap in archive_paths:
+            if len(results) >= limit:
+                break
+            archive_data = read_archive_txt(ap)
+            if archive_data:
+                content = archive_data.get("content", "")
+                if query.lower() in content.lower():
+                    results.append({
+                        "memory_id": archive_data.get("memory_id", Path(ap).stem),
+                        "summary": content[:100],
+                        "tags": archive_data.get("tags", []),
+                        "links": archive_data.get("links", []),
+                        "timestamp": archive_data.get("created"),
+                        "source": archive_data.get("source"),
+                        "private": True
+                    })
+    else:
+        # 构建结果
+        for vr in vector_results:
+            metadata = vr.get("metadata", {})
+            result = {
+                "memory_id": vr.get("memory_id"),
+                "summary": metadata.get("tags", "").split(",")[0] if metadata.get("tags") else "",
+                "tags": metadata.get("tags", "").split(",") if metadata.get("tags") else [],
+                "links": metadata.get("links", "").split(",") if metadata.get("links") else [],
+                "timestamp": metadata.get("timestamp"),
+                "source": metadata.get("source"),
+                "score": vr.get("score"),
+                "private": private
+            }
+            
+            # 如果需要原文
+            if include_content:
+                archive_path = metadata.get("archive_path")
+                if archive_path:
+                    # 私密区需要加前缀
+                    if private and not archive_path.startswith("private/"):
+                        archive_path = f"private/{archive_path}"
+                    archive_data = read_archive_txt(archive_path)
+                    if archive_data:
+                        result["content"] = archive_data.get("content")
+            
+            results.append(result)
     
     # 过滤 dormant（除非明确要求包含）
     if not include_dormant:
-        results = _filter_active_only(results)
+        results = _filter_active_only(results, private=private)
     else:
         # include_dormant=True：搜索沉睡层，并尝试唤醒命中的记忆
-        dormant_results = _search_dormant(query, limit)
+        dormant_results = _search_dormant(query, limit, private=private)
         for dr in dormant_results:
             _reactivate_from_dormant(
                 dr.get('memory_id'),
                 dr.get('summary', ''),
                 dr.get('tags', []),
-                dr.get('links', [])
+                dr.get('links', []),
+                private=dr.get('private', private)
             )
         results.extend(dormant_results)
     
     return results
 
 
-def recall_by_memory_id(memory_id: str, include_content: bool = True, private: bool = False) -> dict:
+def recall_by_memory_id(
+    memory_id: str,
+    include_content: bool = True,
+    private: bool = False
+) -> dict:
     """
     精确定位某条记忆
+    
+    Bug② 修复：传入 private 参数，正确搜索私密 archive。
     
     Args:
         memory_id: 记忆 ID
@@ -275,7 +389,7 @@ def recall_by_memory_id(memory_id: str, include_content: bool = True, private: b
     Returns:
         记忆详情
     """
-    # 找到对应的 archive 文件
+    # Bug② 修复：正确传递 private 参数
     archive_paths = list_archive_txts(private=private)
     
     for ap in archive_paths:
@@ -351,7 +465,7 @@ def recall(
         return [result] if result else []
 
     if tags:
-        results = recall_by_tags(tags, limit, include_content, private)
+        results = recall_by_tags(tags, limit, include_content, private, include_dormant)
         for r in results:
             update_last_recalled(r.get("memory_id"))
         return results
