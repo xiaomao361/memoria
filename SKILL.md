@@ -152,17 +152,8 @@ python3 ~/.qclaw/skills/memoria/scripts/recall.py --search "关键词" --include
 ## 运维
 
 ```bash
-# 重建索引（扫描 archive/ 和 private/memories/，自动重建完整索引）
-cd ~/.qclaw/skills/memoria/scripts && python3 -c "
-from lib.links import rebuild_index
-# 需手动调用重建逻辑
-"
-
-# 自动清理过期待办（dry_run 预览）
-python3 -c "from lib.links import auto_cleanup_stale_todos; print(auto_cleanup_stale_todos(days=30, dry_run=True))"
-
-# 自动清理（实际执行）
-python3 -c "from lib.links import auto_cleanup_stale_todos; print(auto_cleanup_stale_todos(days=30, dry_run=False))"
+# 全量重建（从 archive 重建热缓存+向量+链接）
+python3 ~/.qclaw/skills/memoria/scripts/rebuild.py
 
 # Session 冷备份（cron 每天 23:30 自动执行）
 python3 ~/.qclaw/skills/memoria/scripts/auto_archive.py
@@ -179,8 +170,9 @@ python3 ~/.qclaw/skills/memoria/scripts/auto_archive.py
 | `dream.py` | Dream 层（扫描/修复/Strengthen/沉睡/梦境生成） |
 | `auto_archive.py` | Session 冷备份（每天 23:30） |
 | `rebuild.py` | 重建索引（热缓存/向量/链接全量重建） |
-| `proactive_recall.py` | 主动召回（每日 10:00 推送 HEARTBEAT 边缘重要记忆） |
+| `proactive_recall.py` | 主动召回（每日 10:00 推送边缘重要记忆） |
 | `monthly_summary.py` | 月度摘要生成 |
+| `migrate.py` | 格式迁移工具 |
 | `lib/` | 公共模块（archive/vector/hot_cache/links/config） |
 
 ---
@@ -209,19 +201,9 @@ python3 ~/.qclaw/skills/memoria/scripts/store.py \
 
 ---
 
-## 数据状态
+## 详细文档
 
-```
-当前数据量（2026-04-21）：
-- 热缓存 (公开): ~108 条
-- 热缓存 (私密): 6 条
-- Archive (公开): ~184 个文件
-- Archive (私密): ~46 个文件
-- 向量库 (公开): ~135 条
-- Links (公开): 176 实体
-- Links (私密): 46 实体
-- DREAMS.md: 每日 02:00 自动更新
-```
+架构设计、存储格式、配置说明见 `docs/ARCHITECTURE.md`。
 
 ---
 
@@ -281,6 +263,3 @@ python3 ~/.qclaw/skills/memoria/scripts/dream.py --demote --execute
 
 ---
 
-## 废弃脚本
-
-`scripts/_deprecated/` 目录下有旧版本脚本，暂时保留备份。
