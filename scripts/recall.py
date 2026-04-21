@@ -48,8 +48,9 @@ sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
 from lib.archive import read_archive_txt, list_archive_txts
 from lib.vector import search_vector, write_vector, delete_vector
-from lib.hot_cache import list_hot_cache, get_from_hot_cache, update_last_recalled
+from lib.hot_cache import list_hot_cache, get_from_hot_cache, update_last_recalled, get_importance_score, increment_recall_count, update_importance
 from lib.links import get_memories_by_links
+from lib.config import IMPORTANCE_RECALL_BONUS
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -352,7 +353,30 @@ def recall_by_query(
             
             results.append(result)
     
-    # 过滤 dormant（除非明确要求包含）
+    # ═══ 重要度重排序 ═══
+    for r in results:
+        mid = r.get("memory_id")
+        # 增加召回计数 & 更新重要度分数
+        increment_recall_count(mid)
+        update_importance(mid)
+        # 获取最新重要度
+        imp = get_importance_score(mid)
+        if imp:
+            r["importance_score"] = imp.get("importance_score", 0.0)
+            r["recall_count"] = imp.get("recall_count", 0)
+        else:
+            r["importance_score"] = 0.0
+            r["recall_count"] = 0
+    
+    # 按 final_score = vector_similarity × (1 + importance × bonus) 排序
+    for r in results:
+        vec_score = r.get("score", 0.5)
+        imp_score = r.get("importance_score", 0.0)
+        r["_final_score"] = vec_score * (1.0 + imp_score * IMPORTANCE_RECALL_BONUS)
+    
+    results.sort(key=lambda x: x.get("_final_score", 0), reverse=True)
+    
+    # ═══ 过滤 dormant（除非明确要求包含）
     if not include_dormant:
         results = _filter_active_only(results, private=private)
     else:

@@ -40,7 +40,7 @@ from lib.utils import (
 )
 from lib.archive import write_archive_txt, append_to_archive, read_archive_txt
 from lib.vector import write_vector, delete_vector
-from lib.hot_cache import add_to_hot_cache, get_by_session_id, update_hot_cache_entry
+from lib.hot_cache import add_to_hot_cache, get_by_session_id, update_hot_cache_entry, init_importance_fields
 from lib.links import update_links_index, read_links_index
 
 
@@ -73,6 +73,24 @@ def log_store_result(
             f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
     except Exception as e:
         print(f"ERROR: log write failed: {e}", file=sys.stderr)
+
+
+def _rebuild_graph_async(private: bool = False):
+    """后台静默重建 graph.json，不阻塞主流程"""
+    import subprocess, threading, os as _os
+    base = _os.path.dirname(_os.path.abspath(__file__))
+    build = _os.path.join(base, '..', '..', 'memoria', 'build_graph.py')
+    out = _os.path.join(base, '..', '..', 'memoria', ('graph.json' if not private else _os.path.join('private', 'graph.json')))
+    inp = _os.path.join(base, '..', '..', 'memoria', ('links.json' if not private else _os.path.join('private', 'links.json')))
+    # 不等待结果，静默执行
+    def run():
+        try:
+            subprocess.run(['python3', build, '-i', inp, '-o', out],
+                          capture_output=True, timeout=30)
+        except Exception:
+            pass
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
 
 
 def store(
@@ -223,6 +241,8 @@ def store(
         
         # Step 3: 写热缓存（私密区跳过）
         if not private:
+            # 初始化重要度字段
+            imp_fields = init_importance_fields(memory_id, tags)
             if not add_to_hot_cache(
                 memory_id=memory_id,
                 archive_path=archive_path,
@@ -230,7 +250,8 @@ def store(
                 tags=tags,
                 links=links,
                 source=source,
-                session_id=session_id
+                session_id=session_id,
+                importance_fields=imp_fields
             ):
                 status["hot_cache"] = "failed"
         
@@ -244,6 +265,9 @@ def store(
     
     # 记录日志
     log_store_result(memory_id, source, status, duration_ms, private=private)
+    
+    # 重建图谱数据（后台静默执行，不阻塞返回）
+    _rebuild_graph_async(private=private)
     
     final_archive_path = (
         existing_memory.get("archive_path") if mode == "update" 

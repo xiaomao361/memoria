@@ -152,14 +152,14 @@ def rebuild(force: bool = False) -> dict:
     
     # 热缓存数据（增量模式：读取现有的）
     if force:
-        hot_cache_data = {"memories": []}
+        hot_cache_data = {}
     else:
         hot_cache_data = read_hot_cache()
         if not hot_cache_data:
-            hot_cache_data = {"memories": []}
+            hot_cache_data = {}
     
-    # 热缓存中的 memory_id 集合
-    hot_cache_ids = {m.get("memory_id") for m in hot_cache_data.get("memories", [])}
+    # 热缓存中的 memory_id 集合（top-level dict: key = memory_id）
+    hot_cache_ids = set(hot_cache_data.keys())
     
     # links 索引数据（增量模式：读取现有的）
     if force:
@@ -214,7 +214,7 @@ def rebuild(force: bool = False) -> dict:
             
             # 添加到热缓存（如果不在热缓存中）
             if memory_id not in hot_cache_ids:
-                hot_cache_data["memories"].append({
+                hot_cache_data[memory_id] = {
                     "id": memory_id,
                     "timestamp": timestamp,
                     "tags": tags,
@@ -225,7 +225,7 @@ def rebuild(force: bool = False) -> dict:
                     "archive_path": archive_path,
                     "session_id": session_id,
                     "storage_type": "hot"
-                })
+                }
                 hot_cache_ids.add(memory_id)
             
             # 更新 links 索引
@@ -243,12 +243,6 @@ def rebuild(force: bool = False) -> dict:
     
     # Step 4: 写入热缓存和 links 索引
     print("\n[4/4] 写入热缓存和 links 索引...")
-    
-    # 按时间排序热缓存（最新的在前）
-    hot_cache_data["memories"].sort(
-        key=lambda x: x.get("timestamp", ""),
-        reverse=True
-    )
     
     write_hot_cache(hot_cache_data)
     write_links_index(links_index)

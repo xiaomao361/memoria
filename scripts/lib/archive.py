@@ -145,6 +145,11 @@ def _parse_new_format(full_content: str) -> dict:
             key = key.strip()
             value = value.strip()
             
+            # 去掉单引号或双引号包裹
+            if (value.startswith("'") and value.endswith("'")) or \
+               (value.startswith('"') and value.endswith('"')):
+                value = value[1:-1]
+            
             if value.startswith('[') and value.endswith(']'):
                 try:
                     metadata[key] = json.loads(value)
@@ -181,10 +186,21 @@ def _parse_old_format(full_content: str, archive_path: str) -> dict:
     
     content_lines = []
     
-    for line in lines:
-        if line.startswith('# '):
-            # 解析注释行
-            comment = line[2:].strip()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        
+        # ── 优先判断是否是标题行 ──
+        # 第一行（无 "# " 前缀）：# 标题... 或直接是标题
+        if i == 0 and 'title' not in metadata:
+            clean_title = stripped.lstrip('#').strip()
+            metadata['title'] = clean_title
+            continue
+        
+        # ── 注释行：# xxx ──
+        if stripped.startswith('# '):
+            comment = stripped[2:].strip()
             
             if comment.startswith('创建时间:'):
                 metadata['created'] = comment.replace('创建时间:', '').strip()
@@ -194,12 +210,28 @@ def _parse_old_format(full_content: str, archive_path: str) -> dict:
                 links_str = comment.replace('链接:', '').strip()
                 metadata['links'] = [l.strip() for l in links_str.split(',') if l.strip()]
                 metadata['tags'] = metadata['links'].copy()
-            elif ':' not in comment:
-                # 标题行（第一个没有冒号的注释）
-                if 'title' not in metadata:
-                    metadata['title'] = comment
-        else:
-            content_lines.append(line)
+            elif ':' not in comment and 'title' not in metadata:
+                metadata['title'] = comment
+            continue
+        
+        # ── 分隔符 ──
+        if '---' in stripped:
+            continue
+        
+        # ── 迁移文件特殊格式：无 "# " 前缀的 key: value 行 ──
+        # 只匹配 ASCII colon，不匹配中文冒号（：）
+        if ':' in stripped and not line.startswith('# '):
+            key, _, value = stripped.partition(':')
+            key = key.strip()
+            value = value.strip()
+            if key in ('memory_id', 'created', 'source', 'session_id', 'version'):
+                metadata[key] = value
+            elif key in ('tags', 'links'):
+                metadata[key] = [v.strip() for v in value.split(',') if v.strip()]
+            continue
+        
+        # ── 正文内容行 ──
+        content_lines.append(line)
     
     # 如果没有 memory_id，从文件名提取
     if 'memory_id' not in metadata or not metadata['memory_id']:

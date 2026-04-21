@@ -31,6 +31,7 @@ SKILL_LIB_DIR = SCRIPT_DIR / "lib"
 sys.path.insert(0, str(SKILL_LIB_DIR))
 
 from lib.archive import read_archive_txt, list_archive_txts
+from lib.config import HOT_CACHE_CAPACITY
 from lib.hot_cache import read_hot_cache, write_hot_cache
 from lib.links import read_links_index, update_links_index
 from lib.vector import delete_vector
@@ -210,11 +211,12 @@ def _analyze(result: dict) -> list[dict]:
 
     # ── 热缓存容量 ────────────────────────────────────────────────────
     cache_count = result.get("hot_cache", {}).get("total", 0)
-    if cache_count > 150:
+    threshold = int(HOT_CACHE_CAPACITY * 0.8)  # 80% of capacity
+    if cache_count > threshold:
         add(
             "warning", "stale",
-            f"热缓存容量过载（{cache_count} 条 > 150）",
-            "接近容量上限，新记忆会被 FIFO 淘汰。建议调整 lib/config.py 中的 HOT_CACHE_CAPACITY。",
+            f"热缓存容量过载（{cache_count} 条 > {threshold}）",
+            f"接近容量上限 {HOT_CACHE_CAPACITY}，新记忆会被 FIFO 淘汰。建议调整 lib/config.py 中的 HOT_CACHE_CAPACITY。",
             "调整 HOT_CACHE_CAPACITY 或执行冷归档",
             auto_safe=False,
         )
@@ -839,6 +841,110 @@ def update_last_recalled(memory_id: str):
 # 入口
 # ═══════════════════════════════════════════════════════════════════════
 
+def strengthen_important_memories(result: dict, dry_run: bool = True) -> dict:
+    """
+    Strengthen Layer — 主动加强重要记忆。
+    
+    扫描 hot_cache 中 importance_score >= 0.5 的记忆，
+    如果上次加强时间超过 7 天，则 +0.05 重要度。
+    
+    这与 Demote Layer 互补：Demote 是"遗忘不重要的"，
+    Strengthen 是"强化重要的"。
+    """
+    from lib.config import (
+        IMPORTANCE_THRESHOLD, IMPORTANCE_STRENGTHEN_STEP,
+        IMPORTANCE_STRENGTHEN_GAP_DAYS, PROTECTION_TAGS
+    )
+    from lib.hot_cache import (
+        list_by_importance, update_importance, write_hot_cache,
+        read_hot_cache, get_utc_timestamp
+    )
+    
+    now = datetime.now(timezone.utc)
+    gap_delta = timedelta(days=IMPORTANCE_STRENGTHEN_GAP_DAYS)
+    
+    # 获取重要记忆（≥门槛）
+    important = list_by_importance(min_score=IMPORTANCE_THRESHOLD)
+    
+    strengthened = []
+    skipped = []
+    
+    for item in important:
+        mid = item["memory_id"]
+        last_str = item.get("last_strengthened")
+        importance_score = item["importance_score"]
+        
+        # 检查是否满足加强条件
+        can_strengthen = False
+        reason = ""
+        
+        if not last_str:
+            # 从未加强过 → 可以加强
+            can_strengthen = True
+            reason = "首次加强"
+        else:
+            try:
+                last_dt = datetime.fromisoformat(last_str.replace("Z", "+00:00"))
+                if (now - last_dt) >= gap_delta:
+                    can_strengthen = True
+                    reason = f"距上次加强已过 {IMPORTANCE_STRENGTHEN_GAP_DAYS} 天"
+                else:
+                    days_since = (now - last_dt).days
+                    reason = f"距上次加强仅 {days_since} 天（需间隔 {IMPORTANCE_STRENGTHEN_GAP_DAYS} 天）"
+            except Exception:
+                can_strengthen = True
+                reason = "上次加强时间解析异常，当首次处理"
+        
+        if can_strengthen:
+            new_score = min(1.0, importance_score + IMPORTANCE_STRENGTHEN_STEP)
+            if dry_run:
+                # dry-run：预览哪些会被加强
+                strengthened.append({
+                    "memory_id": mid,
+                    "current_score": importance_score,
+                    "new_score": new_score,
+                    "reason": reason,
+                    "tags": item.get("tags", [])
+                })
+            else:
+                # 真正执行：更新热缓存（dict key 格式）
+                cache = read_hot_cache()
+                if mid in cache and isinstance(cache[mid], dict):
+                    cache[mid]["importance_score"] = round(new_score, 3)
+                    cache[mid]["last_strengthened"] = get_utc_timestamp()
+                write_hot_cache(cache)
+                strengthened.append({
+                    "memory_id": mid,
+                    "current_score": importance_score,
+                    "new_score": new_score,
+                    "reason": reason,
+                    "tags": item.get("tags", [])
+                })
+        else:
+            if last_str:
+                try:
+                    last_dt = datetime.fromisoformat(last_str.replace("Z", "+00:00"))
+                    days_since = (now - last_dt).days
+                    reason = f"距上次加强仅 {days_since} 天（需间隔 {IMPORTANCE_STRENGTHEN_GAP_DAYS} 天）"
+                except Exception:
+                    reason = "上次加强时间解析异常"
+            else:
+                reason = "分数不满足条件"
+            skipped.append({
+                "memory_id": mid,
+                "current_score": importance_score,
+                "reason": reason,
+                "tags": item.get("tags", [])
+            })
+    
+    return {
+        "strengthened": strengthened,
+        "skipped": skipped,
+        "total_important": len(important),
+        "dry_run": dry_run
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Memoria Dream — 睡眠整理层")
     parser.add_argument("--scan", action="store_true", help="扫描并生成报告（等同于 --dry-run）")
@@ -846,6 +952,7 @@ def main():
     parser.add_argument("--execute", action="store_true", help="扫描 + 执行安全操作")
     parser.add_argument("--dream", action="store_true", help="生成彩蛋：Clara 的梦境叙事")
     parser.add_argument("--demote", action="store_true", help="降权沉睡记忆（30天未recall）")
+    parser.add_argument("--strengthen", action="store_true", help="加强重要记忆")
     parser.add_argument("--full", action="store_true", help="完整执行（等同于 --execute --dream）")
 
     args = parser.parse_args()
@@ -854,6 +961,8 @@ def main():
         mode = "full"
     elif args.execute and args.dream:
         mode = "full"
+    elif args.strengthen:
+        mode = "strengthen"
     elif args.demote:
         mode = "demote"
     elif args.execute:
@@ -894,6 +1003,23 @@ def main():
             print(f"   梦境已写入热缓存 + archive（AI 生成）")
         else:
             print(f"   AI 梦境将由 cron agent 生成（prompt 已就绪）")
+    elif mode == "strengthen":
+        print("\n⭐ 阶段三：加强重要记忆...")
+        str_dry_run = not args.execute
+        str_result = strengthen_important_memories(result, dry_run=str_dry_run)
+        if str_dry_run:
+            print(f"   [dry-run] 将加强 {len(str_result['strengthened'])} 条，跳过 {len(str_result['skipped'])} 条")
+            for s in str_result["strengthened"]:
+                print(f"     • {s['memory_id']} ({s['current_score']:.2f} → {s['new_score']:.2f}) {s['reason']}")
+        else:
+            print(f"   ✅ 已加强 {len(str_result['strengthened'])} 条，跳过 {len(str_result['skipped'])} 条")
+            for s in str_result["strengthened"]:
+                print(f"     • {s['memory_id']} ({s['current_score']:.2f} → {s['new_score']:.2f})")
+        print("\n🗄️ 阶段四：降权沉睡记忆...")
+        demote_result = demote_stale_memories(result, dry_run=True)
+        print(f"   活跃: {demote_result['active']} 条 | 需降权: {demote_result['demoted']} 条")
+        # 报告阶段号调高
+        report_stage = "阶段五"
     elif mode == "demote":
         print("\n🗄️ 阶段三：降权沉睡记忆...")
         # 如果有 --execute 则真正执行，否则只是预演
