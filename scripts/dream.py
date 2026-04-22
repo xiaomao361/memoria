@@ -32,7 +32,7 @@ sys.path.insert(0, str(SKILL_LIB_DIR))
 
 from lib.archive import read_archive_txt, list_archive_txts
 from lib.config import HOT_CACHE_CAPACITY
-from lib.hot_cache import read_hot_cache, write_hot_cache
+from lib.hot_cache import read_hot_cache, write_hot_cache, add_to_hot_cache, _entries
 from lib.links import read_links_index, update_links_index
 from lib.vector import delete_vector
 
@@ -69,7 +69,7 @@ def scan() -> dict:
 
 def _scan_hot_cache() -> dict:
     cache = read_hot_cache()
-    entries = cache.get("memories", [])
+    entries = _entries(cache)
     tag_freq: dict[str, int] = {}
     source_freq: dict[str, int] = {}
     for e in entries:
@@ -690,21 +690,16 @@ def append_dream_to_memoria(result: dict, dream_content: str, dream_id: Optional
 
     archive_full.write_text("\n".join(yaml_lines), encoding="utf-8")
 
-    # 追加到热缓存
-    cache = read_hot_cache()
-    cache["memories"].append({
-        "id": dream_id,
-        "memory_id": dream_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "tags": ["梦境", "Clara", "彩蛋"],
-        "links": [],
-        "summary": dream_content[:80].replace("\n", " "),
-        "source": "dream",
-        "archive_path": str(archive_full),
-        "session_id": "dream-session",
-        "storage_type": "dream",
-    })
-    write_hot_cache(cache)
+    # 追加到热缓存（使用 add_to_hot_cache，自动兼容新旧格式）
+    add_to_hot_cache(
+        memory_id=dream_id,
+        archive_path=str(archive_full),
+        summary=dream_content[:80].replace("\n", " "),
+        tags=["梦境", "Clara", "彩蛋"],
+        links=[],
+        source="dream",
+        session_id="dream-session"
+    )
 
     print(f"🌙 梦境记忆已写入: {archive_path}")
     return dream_id
@@ -725,7 +720,7 @@ def demote_stale_memories(scan_result: dict, days_threshold: int = 30, dry_run: 
     4. 下次搜索时默认不查 dormant（除非 explicitly 指定）
     """
     cache = read_hot_cache()
-    memories = cache.get("memories", [])
+    entries = _entries(cache)
     
     now = datetime.now(timezone.utc)
     threshold = now - timedelta(days=days_threshold)
@@ -830,7 +825,8 @@ def _move_to_dormant(memory: dict, private: bool = False):
 def update_last_recalled(memory_id: str):
     """被 recall 时调用，更新 last_recalled 时间"""
     cache = read_hot_cache()
-    for m in cache.get("memories", []):
+    entries = _entries(cache)
+    for m in entries:
         if m.get("id") == memory_id or m.get("memory_id") == memory_id:
             m["last_recalled"] = datetime.now(timezone.utc).isoformat()
             break
