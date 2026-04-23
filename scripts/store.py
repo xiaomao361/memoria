@@ -79,7 +79,7 @@ def _rebuild_graph_async(private: bool = False):
     """后台静默重建 graph.json，不阻塞主流程"""
     import subprocess, threading, os as _os
     base = _os.path.dirname(_os.path.abspath(__file__))
-    build = _os.path.join(base, '..', '..', 'memoria', 'build_graph.py')
+    build = _os.path.join(base, 'build_graph.py')
     out = _os.path.join(base, '..', '..', 'memoria', ('graph.json' if not private else _os.path.join('private', 'graph.json')))
     inp = _os.path.join(base, '..', '..', 'memoria', ('links.json' if not private else _os.path.join('private', 'links.json')))
     # 不等待结果，静默执行
@@ -239,21 +239,20 @@ def store(
         ):
             status["vector"] = "failed"
         
-        # Step 3: 写热缓存（私密区跳过）
-        if not private:
-            # 初始化重要度字段
-            imp_fields = init_importance_fields(memory_id, tags)
-            if not add_to_hot_cache(
-                memory_id=memory_id,
-                archive_path=archive_path,
-                summary=summary,
-                tags=tags,
-                links=links,
-                source=source,
-                session_id=session_id,
-                importance_fields=imp_fields
-            ):
-                status["hot_cache"] = "failed"
+        # Step 3: 写热缓存（私密区同样写入 private/memoria.json）
+        imp_fields = init_importance_fields(memory_id, tags)
+        if not add_to_hot_cache(
+            memory_id=memory_id,
+            archive_path=archive_path,
+            summary=summary,
+            tags=tags,
+            links=links,
+            source=source,
+            session_id=session_id,
+            importance_fields=imp_fields,
+            private=private
+        ):
+            status["hot_cache"] = "failed"
         
         # Step 4: 写 links 索引（tags 也加入索引）
         all_links = list(set(links + tags))
@@ -267,7 +266,7 @@ def store(
     log_store_result(memory_id, source, status, duration_ms, private=private)
     
     # 重建图谱数据（后台静默执行，不阻塞返回）
-    _rebuild_graph_async(private=private)
+
     
     final_archive_path = (
         existing_memory.get("archive_path") if mode == "update" 

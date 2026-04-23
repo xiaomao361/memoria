@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).parent / "lib"))
 
 from lib.archive import read_archive_txt, list_archive_txts
 from lib.vector import search_vector, write_vector, delete_vector
-from lib.hot_cache import list_hot_cache, get_from_hot_cache, update_last_recalled, get_importance_score, increment_recall_count, update_importance
+from lib.hot_cache import list_hot_cache, get_from_hot_cache, update_last_recalled, get_importance_score, increment_recall_count, update_importance, read_hot_cache, write_hot_cache
 from lib.links import get_memories_by_links
 from lib.config import IMPORTANCE_RECALL_BONUS
 
@@ -129,6 +129,7 @@ def _reactivate_from_dormant(
     """
     from lib.hot_cache import read_hot_cache, write_hot_cache
     from lib.archive import read_archive_txt
+    from pathlib import Path
     
     # 1. 确定 dormant 目录路径
     if private:
@@ -164,16 +165,24 @@ def _reactivate_from_dormant(
         private=private  # ← Bug① 修复：保持私密属性
     )
     
-    # 4. 更新热缓存：恢复为活跃
-    cache = read_hot_cache()
-    for m in cache.get("memories", []):
-        mid = m.get("id") or m.get("memory_id")
-        if mid == memory_id:
-            m["storage_type"] = "active"
-            m["last_recalled"] = datetime.now(timezone.utc).isoformat()
-            m["archive_path"] = restored_archive_path
-            break
-    write_hot_cache(cache)
+    # 4. 更新热缓存：恢复为活跃（兼容新旧格式）
+    cache = read_hot_cache(private=private)
+    
+    # 新格式：dict key 直接寻址
+    if memory_id in cache and isinstance(cache[memory_id], dict):
+        cache[memory_id]["storage_type"] = "active"
+        cache[memory_id]["last_recalled"] = datetime.now(timezone.utc).isoformat()
+        cache[memory_id]["archive_path"] = restored_archive_path
+    # 旧格式：memories 数组
+    else:
+        for m in cache.get("memories", []):
+            mid = m.get("id") or m.get("memory_id")
+            if mid == memory_id:
+                m["storage_type"] = "active"
+                m["last_recalled"] = datetime.now(timezone.utc).isoformat()
+                m["archive_path"] = restored_archive_path
+                break
+    write_hot_cache(cache, private=private)
     
     print(f"   ✓ 唤醒沉睡记忆: {memory_id} {'(私密)' if private else ''}")
     return True
@@ -340,16 +349,19 @@ def recall_by_query(
                 "private": private
             }
             
-            # 如果需要原文
-            if include_content:
-                archive_path = metadata.get("archive_path")
-                if archive_path:
-                    # 私密区需要加前缀
-                    if private and not archive_path.startswith("private/"):
-                        archive_path = f"private/{archive_path}"
-                    archive_data = read_archive_txt(archive_path)
-                    if archive_data:
+            # 如果需要原文 or summary 为空，尝试从 archive 取
+            archive_path = metadata.get("archive_path")
+            if archive_path:
+                # 私密区需要加前缀
+                if private and not archive_path.startswith("private/"):
+                    archive_path = f"private/{archive_path}"
+                archive_data = read_archive_txt(archive_path)
+                if archive_data:
+                    if include_content:
                         result["content"] = archive_data.get("content")
+                    # Bug② 修复：summary 为空时，从 archive 原文截取
+                    if not result.get("summary"):
+                        result["summary"] = archive_data.get("content", "")[:100]
             
             results.append(result)
     
@@ -357,8 +369,8 @@ def recall_by_query(
     for r in results:
         mid = r.get("memory_id")
         # 增加召回计数 & 更新重要度分数
-        increment_recall_count(mid)
-        update_importance(mid)
+        increment_recall_count(mid, private=private)
+        update_importance(mid, private=private)
         # 获取最新重要度
         imp = get_importance_score(mid)
         if imp:
@@ -438,17 +450,63 @@ def recall_by_memory_id(
     return None
 
 
-def recall_hot_cache(simple: bool = False) -> list[dict]:
+def recall_recent(limit: int = 5, private: bool = False) -> list[dict]:
     """
-    启动加载热缓存（仅日常区）
+    按时间排序，返回最近写入的 N 条记忆
+    
+    Args:
+        limit: 返回条数
+        private: 是否搜索私密区
+    
+    Returns:
+        按 timestamp 降序的记忆列表
+    """
+    entries = list_hot_cache(private=private)
+    
+    # 过滤掉 summary 为 null 的空记录
+    entries = [e for e in entries if e.get("summary")]
+    
+    # 按 timestamp 降序
+    def _sort_key(e):
+        ts = e.get("timestamp", "")
+        return ts if ts else ""
+    
+    entries.sort(key=_sort_key, reverse=True)
+    return entries[:limit]
+
+
+def recall_hot_cache(simple: bool = False, private: bool = False, clean_null: bool = False) -> list[dict]:
+    """
+    启动加载热缓存
     
     Args:
         simple: 简单模式，只返回 summary
+        private: 是否加载私密热缓存
+        clean_null: 是否清理 summary 为 null 的空记录
     
     Returns:
         热缓存条目列表
     """
-    entries = list_hot_cache()
+    entries = list_hot_cache(private=private)
+    
+    # 清理空记录
+    if clean_null:
+        before = len(entries)
+        valid = [e for e in entries if e.get("summary")]
+        after = len(valid)
+        if before != after:
+            cache = read_hot_cache(private=private)
+            for e in entries:
+                mid = e.get("memory_id") or e.get("id")
+                if mid and mid in cache and not cache[mid].get("summary"):
+                    del cache[mid]
+            # 重建 entries 索引
+            cache["entries"] = [mid for mid in cache.get("entries", []) if mid in cache]
+            write_hot_cache(cache, private=private)
+            entries = valid
+            print(f"   ✓ 清理完成: {before - after} 条空记录已移除", file=sys.stderr)
+        else:
+            print(f"   ✓ 无空记录需要清理", file=sys.stderr)
     
     if simple:
         # 简单模式：只返回 summary
@@ -485,13 +543,13 @@ def recall(
     if memory_id:
         result = recall_by_memory_id(memory_id, include_content, private)
         if result:
-            update_last_recalled(memory_id)
+            update_last_recalled(memory_id, private=private)
         return [result] if result else []
 
     if tags:
         results = recall_by_tags(tags, limit, include_content, private, include_dormant)
         for r in results:
-            update_last_recalled(r.get("memory_id"))
+            update_last_recalled(r.get("memory_id"), private=private)
         return results
 
     # query=None 时也走通配符搜索（允许查询全部）
@@ -502,10 +560,11 @@ def recall(
 def main():
     parser = argparse.ArgumentParser(description="Memoria 统一读取入口")
     
-    # 查询参数（互斥）
+    # 查询参数
     parser.add_argument("--query", default=None, help="语义搜索")
     parser.add_argument("--tags", default=None, help="标签搜索，逗号分隔")
     parser.add_argument("--memory-id", default=None, help="精确定位")
+    parser.add_argument("--recent", type=int, default=None, metavar="N", help="按时间排序，返回最近 N 条")
     
     # 其他参数
     parser.add_argument("--limit", type=int, default=5, help="返回条数")
@@ -516,12 +575,19 @@ def main():
     # 启动加载模式
     parser.add_argument("--hot-cache", action="store_true", help="启动加载热缓存")
     parser.add_argument("--simple", action="store_true", help="简单模式，只返回 summary")
+    parser.add_argument("--clean-null", action="store_true", help="清理 summary 为空的记录")
     
     args = parser.parse_args()
     
-    # 启动加载模式（仅日常区）
+    # 启动加载模式
     if args.hot_cache:
-        results = recall_hot_cache(simple=args.simple)
+        results = recall_hot_cache(simple=args.simple, private=args.private, clean_null=args.clean_null)
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return
+    
+    # --recent 模式
+    if args.recent is not None:
+        results = recall_recent(limit=args.recent, private=args.private)
         print(json.dumps(results, ensure_ascii=False, indent=2))
         return
     

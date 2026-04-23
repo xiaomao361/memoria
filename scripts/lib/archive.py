@@ -112,7 +112,15 @@ def read_archive_txt(archive_path: str) -> dict:
             if legacy_filepath.exists():
                 filepath = legacy_filepath
     else:
-        filepath = ARCHIVE_DIR / archive_path
+        # 兼容 vector 写入时多打了 "archive/" 前缀的错误路径
+        clean_path = archive_path.replace("archive/", "", 1)
+        filepath = ARCHIVE_DIR / clean_path
+        # 备用：原始路径
+        if not filepath.exists():
+            filepath = ARCHIVE_DIR / archive_path
+        # 文件仍然不存在 → 向量库有记录但归档文件从未写入，静默跳过
+        if not filepath.exists():
+            return None
     
     with open(filepath, 'r', encoding='utf-8') as f:
         full_content = f.read()

@@ -130,7 +130,7 @@ def _scan_links() -> dict:
         "public_tags": len(links.get("tags", {})),
         "public_entities": len(links.get("entities", {})),
         "private_uuids": len(p_links.get("entities", {}).keys()),
-        "raw": links,
+        **links,
     }
 
 
@@ -236,7 +236,7 @@ def _analyze(result: dict) -> list[dict]:
         )
 
     # ── Links UUID 与热缓存不同步（自动修复） ──────────────────────────
-    links = result.get("links", {}).get("raw", {})
+    links = result.get("links", {})
     hot_entries = result.get("hot_cache", {}).get("entries", [])
     hot_ids = {e["memory_id"] for e in hot_entries if e.get("memory_id")}
     # Bug修复：uuids 字段已废弃，改用 entities.keys()
@@ -246,7 +246,7 @@ def _analyze(result: dict) -> list[dict]:
         missing_previews = []
         for e in hot_entries:
             if e.get("memory_id") in missing:
-                missing_previews.append(f"「{e['summary'][:40]}」")
+                missing_previews.append(f"「{e.get('summary', e.get('id', ''))[:40]}」")
         add(
             "info", "sync",
             f"links.entities 缺少 {len(missing)} 个热缓存 UUID",
@@ -292,7 +292,7 @@ def execute(result: dict, dry_run: bool = True) -> dict:
 
         elif category == "sync" and issue["auto_safe"]:
             # 自动修复：补全 links.entities
-            links = result.get("links", {}).get("raw", {})
+            links = result.get("links", {})
             hot_entries = result.get("hot_cache", {}).get("entries", [])
             hot_ids = {e["memory_id"] for e in hot_entries if e.get("memory_id")}
             # Bug修复：uuids 字段已废弃，改用 entities.keys()
@@ -728,7 +728,7 @@ def demote_stale_memories(scan_result: dict, days_threshold: int = 30, dry_run: 
     demoted = []
     active = []
     
-    for m in memories:
+    for m in entries:
         # 初始化 last_recalled（如果没有）
         if "last_recalled" not in m:
             m["last_recalled"] = m.get("timestamp", now.isoformat())
@@ -941,8 +941,38 @@ def strengthen_important_memories(result: dict, dry_run: bool = True) -> dict:
     }
 
 
+def _rebuild_graph(private: bool = False):
+    """
+    调用 build_graph.py 重建 graph.json。
+    由 dream.py 在 links sync 完成后调用，保持图与索引同步。
+    """
+    import subprocess
+    base = SCRIPT_DIR
+    build = base / "build_graph.py"
+    links_path = MEMORIA_ROOT / ("links.json" if not private else f"private/links.json")
+    graph_path = MEMORIA_ROOT / ("graph.json" if not private else f"private/graph.json")
+    if not links_path.exists():
+        print(f"   ⚠️ links.json 不存在，跳过: {links_path}")
+        return
+    result = subprocess.run(
+        ["python3", str(build), "-i", str(links_path), "-o", str(graph_path)],
+        capture_output=True, text=True, timeout=60
+    )
+    if result.returncode == 0:
+        # 解析节点数
+        import json as _json
+        try:
+            g = _json.loads(graph_path.read_text())
+            print(f"   ✅ graph.json 已重建（{len(g.get('nodes', []))} 节点 / {len(g.get('links', []))} 连线）{' [私密]' if private else ''}")
+        except Exception:
+            print(f"   ✅ graph.json 已重建{' [私密]' if private else ''}")
+    else:
+        print(f"   ❌ graph 重建失败: {result.stderr[:200]}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Memoria Dream — 睡眠整理层")
+    parser.add_argument("--rebuild-graph", action="store_true", help="单独重建 graph.json（links.json 同步后）")
     parser.add_argument("--scan", action="store_true", help="扫描并生成报告（等同于 --dry-run）")
     parser.add_argument("--dry-run", action="store_true", help="仅扫描，不执行")
     parser.add_argument("--execute", action="store_true", help="扫描 + 执行安全操作")
@@ -968,9 +998,17 @@ def main():
     else:
         mode = "scan"
 
+    if args.rebuild_graph:
+        print("\n🔗 重建 graph.json...")
+        _rebuild_graph(private=False)
+        _rebuild_graph(private=True)
+        print("\n✅ 完成")
+        return
+
     print("🌙 Memoria Dream 启动")
     print(f"   模式: {mode}")
     print(f"   时间: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+
 
     # 阶段一：扫描
     print("\n📡 阶段一：扫描中...")
@@ -982,6 +1020,10 @@ def main():
         print("\n⚡ 阶段二：执行自动安全操作...")
         execution = execute(result, dry_run=False)
         print(f"   已执行 {len(execution['executed'])} 项，跳过 {len(execution['skipped'])} 项")
+        # links sync 后重建 graph（同步更新图索引）
+        print("\n🔗 同步 links 后重建 graph.json...")
+        _rebuild_graph(private=False)
+        _rebuild_graph(private=True)
     else:
         print("\n🔍 阶段二：预演（加 --execute 才会实际执行）")
         execution = execute(result, dry_run=True)
