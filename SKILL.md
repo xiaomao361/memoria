@@ -9,7 +9,7 @@ metadata:
     emoji: "🧠"
 ---
 
-# Memoria — 记忆系统 v4.4.1
+# Memoria — 记忆系统 v5.1
 
 > 跨会话记忆，向量检索，双向链接，永不遗忘。
 > 新增：Strengthen Layer（重要度加权） + 主动召回 + 月度摘要 + 私密记忆架构对齐

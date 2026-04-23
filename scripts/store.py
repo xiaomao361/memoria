@@ -156,13 +156,13 @@ def store(
         # 增量更新模式（仅日常区）
         try:
             # Step 1: 追加到 archive TXT
-            if not append_to_archive(memory_id, content, private=False):
+            if not append_to_archive(memory_id, content, private=private):
                 status["archive"] = "failed: append failed"
             
             # Step 2: 重新写入向量库（删除旧向量，重新写入）
             archive_path = existing_memory.get("archive_path", "")
             if archive_path:
-                delete_vector(memory_id, private=False)
+                delete_vector(memory_id, private=private)
                 full_record = read_archive_txt(archive_path)
                 full_content = full_record.get("content", "") if full_record else ""
                 merged_content = full_content + "\n\n---\n\n" + content
@@ -175,31 +175,31 @@ def store(
                     links=links,
                     source=source,
                     session_id=session_id,
-                    private=False
+                    private=private
                 ):
                     status["vector"] = "failed"
             
             # Step 3: 更新热缓存
-            if not update_hot_cache_entry(memory_id, content, tags, links):
+            if not update_hot_cache_entry(memory_id, content, tags, links, private=private):
                 status["hot_cache"] = "failed: update failed"
             
             # Step 4: 更新 links（追加新 links）
-            existing_links = read_links_index(private=False)
+            existing_links = read_links_index(private=private)
             current_links = existing_links.get(memory_id, [])
             merged_links = list(set(current_links + links))
-            if not update_links_index(links=merged_links, memory_id=memory_id, private=False):
+            if not update_links_index(links=merged_links, memory_id=memory_id, private=private):
                 status["links"] = "failed"
                 
         except Exception as e:
             status["archive"] = f"failed: {e}"
             duration_ms = int((time.time() - start_time) * 1000)
-            log_store_result(memory_id, source, status, duration_ms, private=False)
+            log_store_result(memory_id, source, status, duration_ms, private=private)
             return {
                 "memory_id": memory_id,
                 "archive_path": existing_memory.get("archive_path") if existing_memory else None,
                 "status": status,
                 "mode": mode,
-                "private": False
+                "private": private
             }
     else:
         # 新建模式
