@@ -50,7 +50,8 @@ from lib.archive import read_archive_txt, list_archive_txts
 from lib.vector import search_vector, write_vector, delete_vector
 from lib.hot_cache import list_hot_cache, get_from_hot_cache, update_last_recalled, get_importance_score, increment_recall_count, update_importance, read_hot_cache, write_hot_cache
 from lib.links import get_memories_by_links
-from lib.config import IMPORTANCE_RECALL_BONUS
+from lib.config import IMPORTANCE_RECALL_BONUS, IMPORTANCE_TIME_DECAY_HALF_LIFE
+import math
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -380,11 +381,28 @@ def recall_by_query(
             r["importance_score"] = 0.0
             r["recall_count"] = 0
     
-    # 按 final_score = vector_similarity × (1 + importance × bonus) 排序
+    # 按 final_score = vector_similarity × time_decay × (1 + importance × bonus) 排序
+    now = datetime.now(timezone.utc)
+    half_life = IMPORTANCE_TIME_DECAY_HALF_LIFE
+    
     for r in results:
         vec_score = r.get("score", 0.5)
         imp_score = r.get("importance_score", 0.0)
-        r["_final_score"] = vec_score * (1.0 + imp_score * IMPORTANCE_RECALL_BONUS)
+        
+        # 时间衰减计算
+        ts = r.get("timestamp")
+        if ts:
+            try:
+                ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")) if isinstance(ts, str) else ts
+                days_old = max(0, (now - ts_dt).days)
+                time_decay = math.exp(-0.693 * days_old / half_life)  # 指数衰减，半衰期后权重50%
+            except:
+                time_decay = 1.0  # 解析失败不惩罚
+        else:
+            time_decay = 1.0  # 无时间戳不惩罚
+        
+        r["_time_decay"] = round(time_decay, 3)
+        r["_final_score"] = vec_score * time_decay * (1.0 + imp_score * IMPORTANCE_RECALL_BONUS)
     
     results.sort(key=lambda x: x.get("_final_score", 0), reverse=True)
     

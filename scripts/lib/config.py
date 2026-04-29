@@ -31,6 +31,7 @@ IMPORTANCE_WEIGHT_MANUAL = 0.3     # 手动标记权重
 IMPORTANCE_STRENGTHEN_STEP = 0.05  # 每次加强提升量
 IMPORTANCE_STRENGTHEN_GAP_DAYS = 7 # 加强间隔天数
 IMPORTANCE_RECALL_BONUS = 0.5      # recall 重排序加成系数（×1.5 封顶）
+IMPORTANCE_TIME_DECAY_HALF_LIFE = 14  # 时间衰减半衰期（天），14天后权重降为 ~50%
 
 # 保护标签列表
 PROTECTION_TAGS = {

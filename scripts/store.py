@@ -148,7 +148,7 @@ def store(
     status = {
         "archive": "ok",
         "vector": "ok",
-        "hot_cache": "skipped" if private else "ok",
+        "hot_cache": "pending",
         "links": "ok"
     }
     
@@ -180,7 +180,9 @@ def store(
                     status["vector"] = "failed"
             
             # Step 3: 更新热缓存
-            if not update_hot_cache_entry(memory_id, content, tags, links, private=private):
+            if update_hot_cache_entry(memory_id, content, tags, links, private=private):
+                status["hot_cache"] = "ok"
+            else:
                 status["hot_cache"] = "failed: update failed"
             
             # Step 4: 更新 links（追加新 links）
@@ -241,7 +243,7 @@ def store(
         
         # Step 3: 写热缓存（私密区同样写入 private/memoria.json）
         imp_fields = init_importance_fields(memory_id, tags)
-        if not add_to_hot_cache(
+        if add_to_hot_cache(
             memory_id=memory_id,
             archive_path=archive_path,
             summary=summary,
@@ -252,6 +254,8 @@ def store(
             importance_fields=imp_fields,
             private=private
         ):
+            status["hot_cache"] = "ok"
+        else:
             status["hot_cache"] = "failed"
         
         # Step 4: 写 links 索引（tags 也加入索引）

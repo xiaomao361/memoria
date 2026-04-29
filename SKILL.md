@@ -300,6 +300,8 @@ python3 ~/.qclaw/skills/memoria/scripts/dream.py --demote --execute
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
-| v4.4.1 | 2026-04-23 | `lib/hot_cache.py` 修复空 entries 列表 bug；recall 加 `--recent N` / `--clean-null` |
-| v4.4 | 2026-04-23 | 私密记忆架构对齐（新增 private/memoria.json + 同步写入）；Graph 重建策略变更 |
-| v4.3 | 2026-04-20 | Strengthen Layer + 主动召回 + 月度摘要三特性上线 |
+| v5.1 | 2026-04-23 | Bug修复链（demote变量/私密热缓存/store.py private参数/链接访问/摘要key）+ 架构对齐 + CHANGELOG 新增 |
+| v5.0 | 2026-04-20 | Strengthen Layer + 主动召回 + 月度摘要；热缓存格式重构为 top-level dict |
+| v4.3 | 2026-04-17 | Dream Layer 三层架构 + 沉睡机制 + 私密记忆区完善 |
+| v4.0 | 2026-04-14 | 双向链接系统 + 增量更新 + Session 冷备份 |
+| v3.0 | 2026-04-10 | 向量库（ChromaDB）上线 |
