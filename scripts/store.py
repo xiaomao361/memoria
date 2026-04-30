@@ -39,7 +39,7 @@ from lib.utils import (
     extract_summary
 )
 from lib.archive import write_archive_txt, append_to_archive, read_archive_txt
-from lib.vector import write_vector, delete_vector
+from lib.vector import write_vector, delete_vector, search_vector
 from lib.hot_cache import add_to_hot_cache, get_by_session_id, update_hot_cache_entry, init_importance_fields
 from lib.links import update_links_index, read_links_index
 
@@ -93,6 +93,56 @@ def _rebuild_graph_async(private: bool = False):
     t.start()
 
 
+# 去重配置
+DEDUP_WINDOW_HOURS = 1
+DEDUP_SIMILARITY_THRESHOLD = 0.8
+
+
+def _find_duplicate(content: str, source: str, private: bool = False) -> dict:
+    """
+    查找近期相似记忆（短期窗口去重）
+    
+    返回:
+        相似记忆的 dict，或 None
+    """
+    try:
+        from datetime import datetime, timezone, timedelta
+        
+        # 向量搜索找相似内容
+        results = search_vector(content, limit=5, private=private)
+        if not results:
+            return None
+        
+        now = datetime.now(timezone.utc)
+        window = timedelta(hours=DEDUP_WINDOW_HOURS)
+        
+        for result in results:
+            # 检查相似度
+            score = result.get("score", 0)
+            if score < DEDUP_SIMILARITY_THRESHOLD:
+                continue
+            
+            # 检查 source 是否匹配
+            metadata = result.get("metadata", {})
+            if metadata.get("source") != source:
+                continue
+            
+            # 检查时间是否在窗口内
+            timestamp = metadata.get("timestamp", "")
+            if timestamp:
+                try:
+                    ts = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    if now - ts <= window:
+                        return result
+                except:
+                    pass
+        
+        return None
+    except Exception as e:
+        print(f"WARN: dedup check failed: {e}", file=sys.stderr)
+        return None
+
+
 def store(
     content: str,
     pre_tags: list[str] = None,
@@ -133,13 +183,29 @@ def store(
     
     # 如果没有已有记忆，生成新 memory_id
     if not existing_memory:
-        memory_id = generate_memory_id()
+        # 检查短期窗口去重（仅日常区）
+        if not private:
+            duplicate = _find_duplicate(content, source, private=private)
+            if duplicate:
+                # 找到重复，转为更新模式
+                existing_memory = {
+                    "memory_id": duplicate["memory_id"],
+                    "archive_path": duplicate["metadata"].get("archive_path", "")
+                }
+                mode = "update"
+                memory_id = duplicate["memory_id"]
+        
+        if mode == "new":
+            memory_id = generate_memory_id()
     
     # 提取 links
     extracted_links = extract_links(content)
     
     # 合并 tags 和 links
     tags, links = merge_tags_and_links(pre_tags, extracted_links)
+    
+    # 标签统一转小写
+    tags = [t.lower() for t in tags]
     
     # 提取摘要
     summary = extract_summary(content)
