@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Memoria</title>
+<style>
+:root {
+  --bg-primary: #0a0e14;
+  --bg-secondary: #131920;
+  --bg-tertiary: #1a2028;
+  --bg-hover: #1e2630;
+  --border: #2a3442;
+  --border-hover: #3d4f63;
+  --text-primary: #e0e6ed;
+  --text-secondary: #8899aa;
+  --text-muted: #5c6d7e;
+  --accent: #5b9cf6;
+  --accent-dim: #2a4a7a;
+  --green: #4ec9a0;
+  --green-dim: #1a3d35;
+  --orange: #e8a855;
+  --orange-dim: #3d2e15;
+  --red: #e85555;
+  --red-dim: #3d1515;
+  --purple: #b07ee8;
+  --purple-dim: #2d1f4a;
+  --radius: 10px;
+  --shadow: 0 2px 12px rgba(0,0,0,0.3);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Segoe UI', sans-serif; background: var(--bg-primary); color: var(--text-primary); line-height: 1.6; }
+.app { display: grid; grid-template-columns: 220px 1fr; height: 100vh; }
+
+/* Sidebar */
+.sidebar { background: var(--bg-secondary); border-right: 1px solid var(--border); padding: 24px 16px; display: flex; flex-direction: column; }
+.logo { display: flex; align-items: center; gap: 10px; margin-bottom: 32px; padding: 0 8px; }
+.logo-icon { width: 32px; height: 32px; background: linear-gradient(135deg, var(--accent), var(--purple)); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+.logo h1 { font-size: 18px; font-weight: 600; color: var(--text-primary); letter-spacing: -0.5px; }
+.nav { display: flex; flex-direction: column; gap: 2px; }
+.nav-item { padding: 10px 12px; border-radius: 8px; cursor: pointer; color: var(--text-secondary); font-size: 14px; transition: all 0.15s; display: flex; align-items: center; gap: 10px; }
+.nav-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.nav-item.active { background: var(--accent-dim); color: var(--accent); font-weight: 500; }
+.nav-item .icon { width: 18px; text-align: center; opacity: 0.7; }
+.nav-divider { height: 1px; background: var(--border); margin: 12px 8px; }
+.nav-section { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; padding: 8px 12px 4px; }
+
+/* Main */
+.main { padding: 28px 32px; overflow-y: auto; }
+.page-title { font-size: 22px; font-weight: 600; margin-bottom: 20px; color: var(--text-primary); }
+
+/* Stats */
+.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 28px; }
+.stat-card { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; transition: border-color 0.15s; }
+.stat-card:hover { border-color: var(--border-hover); }
+.stat-card .value { font-size: 30px; font-weight: 700; color: var(--accent); margin-bottom: 2px; }
+.stat-card .label { font-size: 12px; color: var(--text-muted); }
+
+/* Search */
+.search-bar { display: flex; gap: 10px; margin-bottom: 20px; }
+.search-bar input { flex: 1; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; color: var(--text-primary); font-size: 14px; transition: border-color 0.15s; }
+.search-bar input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,156,246,0.1); }
+.search-bar input::placeholder { color: var(--text-muted); }
+.search-bar button { background: var(--accent); border: none; border-radius: 8px; padding: 12px 20px; color: #fff; cursor: pointer; font-size: 14px; font-weight: 500; transition: opacity 0.15s; }
+.search-bar button:hover { opacity: 0.85; }
+
+/* Memory cards */
+.memory-list { display: flex; flex-direction: column; gap: 8px; }
+.memory-card { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 20px; cursor: pointer; transition: all 0.15s; }
+.memory-card:hover { border-color: var(--border-hover); transform: translateY(-1px); box-shadow: var(--shadow); }
+.memory-card .summary { font-size: 14px; color: var(--text-primary); margin-bottom: 8px; line-height: 1.5; }
+.memory-card .meta { display: flex; gap: 14px; font-size: 12px; color: var(--text-muted); align-items: center; }
+.memory-card .score { color: var(--green); font-weight: 600; }
+
+/* Detail */
+.detail-panel { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; }
+.detail-panel h2 { color: var(--text-primary); margin-bottom: 12px; font-size: 16px; font-weight: 600; line-height: 1.5; }
+.detail-meta { color: var(--text-muted); font-size: 12px; margin-bottom: 12px; display: flex; gap: 16px; }
+.detail-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+.detail-content { white-space: pre-wrap; font-size: 13px; line-height: 1.8; background: var(--bg-primary); padding: 20px; border-radius: 8px; color: var(--text-secondary); border: 1px solid var(--border); }
+.detail-actions { margin-top: 20px; display: flex; gap: 10px; }
+
+/* Tags */
+.tag { padding: 3px 10px; border-radius: 14px; font-size: 11px; font-weight: 500; }
+.tag-default { background: var(--accent-dim); color: var(--accent); }
+.tag-link { background: var(--green-dim); color: var(--green); }
+
+/* Labels grid */
+.labels-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.label-chip { background: var(--bg-tertiary); border: 1px solid var(--border); color: var(--text-primary); padding: 8px 14px; border-radius: 20px; font-size: 13px; cursor: pointer; transition: all 0.15s; }
+.label-chip:hover { border-color: var(--accent); background: var(--accent-dim); }
+.label-chip .count { color: var(--text-muted); margin-left: 6px; font-size: 11px; }
+
+/* Buttons */
+.btn { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-tertiary); color: var(--text-primary); cursor: pointer; font-size: 13px; transition: all 0.15s; }
+.btn:hover { border-color: var(--border-hover); background: var(--bg-hover); }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-primary:hover { opacity: 0.85; }
+.btn-danger { border-color: var(--red-dim); color: var(--red); }
+.btn-danger:hover { background: var(--red-dim); }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+
+/* Graph */
+#graph-canvas { display: block; width: 100%; border-radius: var(--radius); background: var(--bg-primary); border: 1px solid var(--border); cursor: grab; }
+.graph-toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+.graph-toolbar .info { color: var(--text-muted); font-size: 12px; margin-left: auto; }
+
+/* Utilities */
+.hidden { display: none; }
+.empty-state { color: var(--text-muted); text-align: center; padding: 40px; font-size: 14px; }
+.private-gate { text-align: center; padding: 60px 20px; }
+.private-gate p { color: var(--text-muted); margin-bottom: 16px; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="sidebar">
+    <div class="logo">
+      <div class="logo-icon">M</div>
+      <h1>Memoria</h1>
+    </div>
+    <div class="nav">
+      <div class="nav-item active" data-view="dashboard"><span class="icon">◉</span>概览</div>
+      <div class="nav-item" data-view="search"><span class="icon">⌕</span>搜索</div>
+      <div class="nav-item" data-view="graph"><span class="icon">◎</span>图谱</div>
+      <div class="nav-item" data-view="labels"><span class="icon">#</span>标签</div>
+      <div class="nav-item" data-view="recent"><span class="icon">☰</span>全部</div>
+    </div>
+    <div style="margin-top:auto;padding-top:16px;border-top:1px solid var(--border)">
+      <div class="nav-item" data-view="private" style="font-size:12px;color:var(--text-muted)"><span class="icon">◈</span>P</div>
+    </div>
+  </div>
+  <div class="main">
+    <div id="view-dashboard">
+      <div class="page-title">概览</div>
+      <div class="stats-grid" id="stats"></div>
+      <h3 style="margin-bottom:14px;color:var(--text-secondary);font-size:14px;font-weight:500">最近记忆</h3>
+      <div class="memory-list" id="recent-list"></div>
+    </div>
+    <div id="view-search" class="hidden">
+      <div class="page-title">搜索</div>
+      <div class="search-bar">
+        <input id="search-input" placeholder="输入关键词进行语义搜索..." />
+        <button onclick="doSearch()">搜索</button>
+      </div>
+      <div class="memory-list" id="search-results"></div>
+    </div>
+    <div id="view-graph" class="hidden">
+      <div class="page-title">记忆图谱</div>
+      <div class="graph-toolbar">
+        <button class="btn btn-sm btn-primary" onclick="loadGraph(false)">主要</button>
+        <button class="btn btn-sm" onclick="loadGraph(true)">次要</button>
+        <span class="info" id="graph-info">加载中...</span>
+      </div>
+      <canvas id="graph-canvas"></canvas>
+    </div>
+    <div id="view-labels" class="hidden">
+      <div class="page-title">标签</div>
+      <div class="labels-grid" id="labels-list"></div>
+    </div>
+    <div id="view-recent" class="hidden">
+      <div class="page-title">全部记忆</div>
+      <div class="memory-list" id="all-list"></div>
+    </div>
+    <div id="view-private" class="hidden">
+      <div class="private-gate" id="private-gate">
+        <p>此区域需要确认后访问</p>
+        <button class="btn" onclick="unlockPrivate()">确认访问</button>
+      </div>
+      <div class="memory-list hidden" id="private-list"></div>
+    </div>
+    <div id="view-detail" class="hidden">
+      <div class="detail-panel" id="detail-content"></div>
+    </div>
+  </div>
+</div>
+<script>
+const API = '';
+let currentView = 'dashboard';
+let privateUnlocked = false;
+
+document.querySelectorAll('.nav-item').forEach(el => {
+  el.addEventListener('click', () => {
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    el.classList.add('active');
+    showView(el.dataset.view);
+  });
+});
+
+function showView(view) {
+  currentView = view;
+  document.querySelectorAll('.main > div').forEach(d => d.classList.add('hidden'));
+  document.getElementById('view-' + view).classList.remove('hidden');
+  if (view === 'dashboard') loadDashboard();
+  else if (view === 'search') document.getElementById('search-input').focus();
+  else if (view === 'graph') loadGraph(false);
+  else if (view === 'labels') loadLabels();
+  else if (view === 'recent') loadRecent();
+  else if (view === 'private') { if (privateUnlocked) loadPrivate(); }
+}
+
+async function loadDashboard() {
+  const stats = await fetch(API + '/api/stats').then(r => r.json());
+  document.getElementById('stats').innerHTML = `
+    <div class="stat-card"><div class="value">${stats.total}</div><div class="label">总记忆</div></div>
+    <div class="stat-card"><div class="value">${stats.active}</div><div class="label">活跃</div></div>
+    <div class="stat-card"><div class="value">${stats.archived}</div><div class="label">已归档</div></div>
+    <div class="stat-card"><div class="value">${stats.labels}</div><div class="label">标签</div></div>
+  `;
+  const data = await fetch(API + '/api/memories?limit=10').then(r => r.json());
+  document.getElementById('recent-list').innerHTML = renderList(data.memories);
+}
+
+async function doSearch() {
+  const q = document.getElementById('search-input').value.trim();
+  if (!q) return;
+  const data = await fetch(API + `/api/search?q=${encodeURIComponent(q)}&limit=20`).then(r => r.json());
+  document.getElementById('search-results').innerHTML = renderList(data.results);
+}
+document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') doSearch(); });
+
+async function loadLabels() {
+  const data = await fetch(API + '/api/labels').then(r => r.json());
+  document.getElementById('labels-list').innerHTML = data.labels.map(l =>
+    `<div class="label-chip" onclick="searchByLabel('${l.name}')">${l.name}<span class="count">${l.count}</span></div>`
+  ).join('');
+}
+
+async function searchByLabel(name) {
+  showView('search');
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelector('[data-view="search"]').classList.add('active');
+  document.getElementById('search-input').value = '';
+  const data = await fetch(API + `/api/memories?tags=${encodeURIComponent(name)}&limit=30`).then(r => r.json());
+  document.getElementById('search-results').innerHTML = `<div style="margin-bottom:12px;color:var(--text-muted);font-size:13px">标签: <span class="tag tag-default">${name}</span> · ${data.count} 条结果</div>` + renderList(data.memories);
+}
+
+async function loadRecent() {
+  const data = await fetch(API + '/api/memories?limit=50').then(r => r.json());
+  document.getElementById('all-list').innerHTML = renderList(data.memories);
+}
+
+function unlockPrivate() {
+  privateUnlocked = true;
+  document.getElementById('private-gate').classList.add('hidden');
+  document.getElementById('private-list').classList.remove('hidden');
+  loadPrivate();
+}
+
+async function loadPrivate() {
+  const data = await fetch(API + '/api/memories?limit=50&private=true').then(r => r.json());
+  document.getElementById('private-list').innerHTML = renderList(data.memories);
+}
+
+async function showDetail(id) {
+  const data = await fetch(API + `/api/memories/${id}`).then(r => r.json());
+  document.querySelectorAll('.main > div').forEach(d => d.classList.add('hidden'));
+  document.getElementById('view-detail').classList.remove('hidden');
+  const tags = (data.tags || []).map(t => `<span class="tag tag-default">${t}</span>`).join('');
+  const links = (data.links || []).map(l => `<span class="tag tag-link">${l}</span>`).join('');
+  document.getElementById('detail-content').innerHTML = `
+    <h2>${escapeHtml(data.summary || '')}</h2>
+    <div class="detail-meta">
+      <span>${data.created_at ? data.created_at.slice(0,10) : ''}</span>
+      <span>来源: ${data.source}</span>
+      <span>召回: ${data.recall_count || 0} 次</span>
+      <span>重要度: ${(data.importance || 0).toFixed(2)}</span>
+    </div>
+    <div class="detail-tags">${tags} ${links}</div>
+    <div class="detail-content">${escapeHtml(data.content || '')}</div>
+    <div class="detail-actions">
+      <button class="btn" onclick="showView('${currentView}')">返回</button>
+      <button class="btn btn-danger" onclick="deleteMemory('${data.id}')">删除</button>
+    </div>
+  `;
+}
+
+async function deleteMemory(id) {
+  if (!confirm('确定要删除这条记忆吗？')) return;
+  await fetch(API + `/api/memories/${id}`, {method: 'DELETE'});
+  showView(currentView);
+}
+
+function renderList(memories) {
+  if (!memories || !memories.length) return '<div class="empty-state">暂无结果</div>';
+  return memories.map(m => `
+    <div class="memory-card" onclick="showDetail('${m.id}')">
+      <div class="summary">${escapeHtml((m.summary || '').slice(0, 120))}</div>
+      <div class="meta">
+        <span>${m.created_at ? m.created_at.slice(0,10) : ''}</span>
+        <span>${m.source || ''}</span>
+        ${m.score ? `<span class="score">${m.score.toFixed(3)}</span>` : ''}
+        ${m.recall_count ? `<span>召回 ${m.recall_count}</span>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+
+// ═══ Graph ═══
+let graphNodes = [], graphEdges = [], graphAnim = null;
+let gDrag = null, gOffset = {x:0, y:0}, gScale = 1;
+
+async function loadGraph(priv) {
+  const data = await fetch(API + `/api/graph?private=${priv}`).then(r=>r.json());
+  graphNodes = data.nodes.map(n => ({
+    ...n, x: Math.random()*900+50, y: Math.random()*600+50,
+    vx: 0, vy: 0,
+    r: n.type === 'memory' ? 3.5 : 7,
+    color: n.type === 'memory' ? 'var(--accent)' : (n.type === 'tag' ? 'var(--orange)' : 'var(--green)')
+  }));
+  graphEdges = data.edges.map(e => ({
+    source: graphNodes.find(n=>n.id===e.source),
+    target: graphNodes.find(n=>n.id===e.target)
+  })).filter(e => e.source && e.target);
+  document.getElementById('graph-info').textContent = `${graphNodes.length} 节点 · ${graphEdges.length} 连线`;
+  initCanvas();
+  if (graphAnim) cancelAnimationFrame(graphAnim);
+  runSimulation();
+}
+
+function initCanvas() {
+  const canvas = document.getElementById('graph-canvas');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width;
+  canvas.height = Math.max(560, window.innerHeight - 200);
+  gOffset = {x:0, y:0}; gScale = 1;
+
+  canvas.onmousedown = e => {
+    const mx = (e.offsetX - gOffset.x) / gScale, my = (e.offsetY - gOffset.y) / gScale;
+    const hit = graphNodes.find(n => Math.hypot(n.x-mx, n.y-my) < n.r+5);
+    if (hit) { gDrag = hit; hit.fixed = true; canvas.style.cursor='grabbing'; }
+    else { gDrag = {pan:true, sx:e.offsetX, sy:e.offsetY, ox:gOffset.x, oy:gOffset.y}; }
+  };
+  canvas.onmousemove = e => {
+    if (!gDrag) return;
+    if (gDrag.pan) { gOffset.x = gDrag.ox + e.offsetX - gDrag.sx; gOffset.y = gDrag.oy + e.offsetY - gDrag.sy; }
+    else { gDrag.x = (e.offsetX - gOffset.x)/gScale; gDrag.y = (e.offsetY - gOffset.y)/gScale; }
+  };
+  canvas.onmouseup = () => { if(gDrag && !gDrag.pan) gDrag.fixed=false; gDrag=null; canvas.style.cursor='grab'; };
+  canvas.onwheel = e => { e.preventDefault(); gScale *= e.deltaY > 0 ? 0.92 : 1.08; };
+  canvas.ondblclick = e => {
+    const mx = (e.offsetX - gOffset.x)/gScale, my = (e.offsetY - gOffset.y)/gScale;
+    const hit = graphNodes.find(n => Math.hypot(n.x-mx, n.y-my) < n.r+5);
+    if (hit && hit.type === 'memory') showDetail(hit.id);
+    else if (hit) searchByLabel(hit.label);
+  };
+}
+
+function runSimulation() {
+  const canvas = document.getElementById('graph-canvas');
+  const ctx = canvas.getContext('2d');
+  let cooling = 1.0;
+  const colors = { memory: '#5b9cf6', tag: '#e8a855', link: '#4ec9a0' };
+
+  function tick() {
+    for (const n of graphNodes) { n.fx = 0; n.fy = 0; }
+    for (let i=0; i<graphNodes.length; i++) {
+      for (let j=i+1; j<graphNodes.length; j++) {
+        const a = graphNodes[i], b = graphNodes[j];
+        let dx = b.x-a.x, dy = b.y-a.y, dist = Math.max(1, Math.hypot(dx,dy));
+        if (dist > 400) continue;
+        let f = 500/(dist*dist);
+        a.fx -= dx/dist*f; a.fy -= dy/dist*f;
+        b.fx += dx/dist*f; b.fy += dy/dist*f;
+      }
+    }
+    for (const e of graphEdges) {
+      let dx = e.target.x-e.source.x, dy = e.target.y-e.source.y, dist = Math.max(1, Math.hypot(dx,dy));
+      let f = (dist-55)*0.007;
+      e.source.fx += dx/dist*f; e.source.fy += dy/dist*f;
+      e.target.fx -= dx/dist*f; e.target.fy -= dy/dist*f;
+    }
+    const cx = canvas.width/2/gScale, cy = canvas.height/2/gScale;
+    for (const n of graphNodes) { n.fx += (cx-n.x)*0.0006; n.fy += (cy-n.y)*0.0006; }
+    for (const n of graphNodes) {
+      if (n.fixed) continue;
+      n.vx = (n.vx + n.fx)*0.5; n.vy = (n.vy + n.fy)*0.5;
+      n.x += n.vx*cooling; n.y += n.vy*cooling;
+    }
+    cooling *= 0.998; if (cooling < 0.003) cooling = 0.003;
+
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.save(); ctx.translate(gOffset.x, gOffset.y); ctx.scale(gScale, gScale);
+    ctx.globalAlpha = 0.25; ctx.strokeStyle = '#5b9cf6'; ctx.lineWidth = 0.4;
+    for (const e of graphEdges) { ctx.beginPath(); ctx.moveTo(e.source.x,e.source.y); ctx.lineTo(e.target.x,e.target.y); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+    for (const n of graphNodes) {
+      ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,Math.PI*2);
+      ctx.fillStyle = colors[n.type] || colors.memory; ctx.fill();
+    }
+    ctx.font = '9px -apple-system, sans-serif'; ctx.fillStyle = '#8899aa';
+    for (const n of graphNodes) { if (n.type !== 'memory') ctx.fillText(n.label, n.x+n.r+3, n.y+3); }
+    ctx.restore();
+    graphAnim = requestAnimationFrame(tick);
+  }
+  tick();
+}
+
+loadDashboard();
+</script>
+</body>
+</html>
