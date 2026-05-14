@@ -111,6 +111,12 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py get <uuid>
 # 删除（软删除，标记为 archived）
 conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py delete <uuid>
 
+# 恢复已归档记忆
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py restore <uuid>
+
+# 永久删除（不可恢复）
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py delete --purge <uuid>
+
 # 管理标签
 conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py tag <uuid> --add "new_tag" --remove "old_tag"
 ```
@@ -129,6 +135,21 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain suggest-mer
 # 沉睡降权（>30天未召回的记忆标记为 archived）
 conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain dormant
 conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain dormant --dry-run
+```
+
+---
+
+## 导入导出
+
+```bash
+# 导出所有公开记忆为 JSON
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py export -o backup.json
+
+# 导出私密记忆（含已归档）
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py export -o backup.json --private --include-archived
+
+# 从 JSON 文件导入
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py import backup.json
 ```
 
 ---
