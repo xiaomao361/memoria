@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 
-from memoria.core import store, recall, get_memory, delete_memory, update_tags, get_labels, get_stats
+from memoria.core import store, recall, get_memory, delete_memory, restore_memory, purge_memory, update_tags, get_labels, get_stats, get_graph_data
 
 app = FastAPI(title="Memoria", version="6.0")
 
@@ -48,6 +48,7 @@ async def list_memories(
     query: Optional[str] = None,
     tags: Optional[str] = None,
     limit: int = Query(default=20, le=100),
+    offset: int = Query(default=0, ge=0),
     private: bool = False,
     include_archived: bool = False,
     include_content: bool = False,
@@ -57,6 +58,7 @@ async def list_memories(
         query=query,
         tags=tag_list,
         limit=limit,
+        offset=offset,
         private=private,
         include_archived=include_archived,
         include_content=include_content,
@@ -85,9 +87,18 @@ async def create_memory(req: StoreRequest):
 
 
 @app.delete("/api/memories/{memory_id}")
-async def remove_memory(memory_id: str):
+async def remove_memory(memory_id: str, purge: bool = False):
+    if purge:
+        ok = purge_memory(memory_id)
+        return {"id": memory_id, "purged": ok}
     ok = delete_memory(memory_id)
     return {"id": memory_id, "deleted": ok}
+
+
+@app.post("/api/memories/{memory_id}/restore")
+async def restore(memory_id: str):
+    ok = restore_memory(memory_id)
+    return {"id": memory_id, "restored": ok}
 
 
 @app.put("/api/memories/{memory_id}/tags")
@@ -125,47 +136,7 @@ async def stats():
 
 @app.get("/api/graph")
 async def graph_data(private: bool = False):
-    """动态生成关系图数据"""
-    from memoria.db import get_conn, init_db
-    init_db()
-
-    nodes = []
-    edges = []
-    label_nodes = {}
-
-    with get_conn() as conn:
-        rows = conn.execute(
-            """SELECT m.id, m.summary, m.importance, l.name, l.type
-               FROM memories m
-               JOIN labels l ON m.id = l.memory_id
-               WHERE m.archived = 0 AND m.private = ?""",
-            (int(private),),
-        ).fetchall()
-
-    memory_set = set()
-    for row in rows:
-        mid = row["id"]
-        if mid not in memory_set:
-            memory_set.add(mid)
-            nodes.append({
-                "id": mid,
-                "label": row["summary"][:30],
-                "type": "memory",
-                "importance": row["importance"],
-            })
-
-        label_name = row["name"]
-        if label_name not in label_nodes:
-            label_nodes[label_name] = {
-                "id": f"label:{label_name}",
-                "label": label_name,
-                "type": row["type"],
-            }
-
-        edges.append({"source": mid, "target": f"label:{label_name}"})
-
-    nodes.extend(label_nodes.values())
-    return {"nodes": nodes, "edges": edges}
+    return get_graph_data(private=private)
 
 
 def main():

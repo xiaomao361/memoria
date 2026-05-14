@@ -2,8 +2,10 @@
 
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
+from .config import STORE_DIR
 from .db import get_conn, init_db
 from .vector import upsert_vector, search_vectors, delete_vector
 from .filestore import write_file, extract_links
@@ -95,10 +97,21 @@ def store(
     embed_text = f"{summary}\n{content}"
     vec_ok = upsert_vector(mid, embed_text, private=private)
 
-    # 4. 如果是合并操作，标记原始记忆为 archived
+    # 4. 如果是合并操作：迁移标签 + 标记原始记忆为 archived
     if merge_from:
         with get_conn() as conn:
             for old_id in merge_from:
+                # 迁移旧记忆的标签到新记忆
+                old_labels = conn.execute(
+                    "SELECT name, type FROM labels WHERE memory_id = ?",
+                    (old_id,),
+                ).fetchall()
+                for label in old_labels:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO labels (memory_id, name, type) VALUES (?, ?, ?)",
+                        (mid, label["name"], label["type"]),
+                    )
+                # 标记旧记忆为 archived
                 conn.execute(
                     "UPDATE memories SET archived = 1, updated_at = ? WHERE id = ?",
                     (now, old_id),
@@ -121,6 +134,7 @@ def recall(
     tags: Optional[list[str]] = None,
     memory_id: Optional[str] = None,
     limit: int = 10,
+    offset: int = 0,
     private: bool = False,
     include_archived: bool = False,
     include_content: bool = False,
@@ -141,7 +155,7 @@ def recall(
     if query:
         return _recall_by_query(query, limit, private, include_archived, include_content)
 
-    return _recall_recent(limit, private, include_content)
+    return _recall_recent(limit, offset, private, include_content)
 
 
 def _recall_by_id(memory_id: str, include_content: bool) -> list[dict]:
@@ -234,13 +248,13 @@ def _recall_fts(
         return [_row_to_dict(r, include_content) for r in rows]
 
 
-def _recall_recent(limit: int, private: bool, include_content: bool) -> list[dict]:
+def _recall_recent(limit: int, offset: int, private: bool, include_content: bool) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT * FROM memories
                WHERE private = ? AND archived = 0
-               ORDER BY created_at DESC LIMIT ?""",
-            (int(private), limit),
+               ORDER BY created_at DESC LIMIT ? OFFSET ?""",
+            (int(private), limit, offset),
         ).fetchall()
         return [_row_to_dict(r, include_content) for r in rows]
 
@@ -304,6 +318,56 @@ def delete_memory(memory_id: str) -> bool:
     return True
 
 
+def restore_memory(memory_id: str) -> bool:
+    """恢复已归档的记忆"""
+    init_db()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT file_path, private, summary FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "UPDATE memories SET archived = 0, updated_at = ? WHERE id = ?",
+            (_now(), memory_id),
+        )
+        file_path = row["file_path"]
+        private = bool(row["private"])
+        summary = row["summary"]
+
+    # 重新写入向量
+    if file_path:
+        from .filestore import read_file
+        file_data = read_file(file_path)
+        if file_data:
+            content = file_data.get("content", "")
+            upsert_vector(memory_id, f"{summary}\n{content}", private=private)
+    return True
+
+
+def purge_memory(memory_id: str) -> bool:
+    """永久删除记忆（数据库 + 文件 + 向量）"""
+    init_db()
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT file_path FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if not row:
+            return False
+        # 删数据库
+        conn.execute("DELETE FROM labels WHERE memory_id = ?", (memory_id,))
+        conn.execute("DELETE FROM memories_fts WHERE id = ?", (memory_id,))
+        conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+    # 删向量
+    delete_vector(memory_id)
+    # 删文件
+    if row["file_path"]:
+        filepath = STORE_DIR / row["file_path"]
+        if filepath.exists():
+            filepath.unlink()
+    return True
+
+
 def update_tags(memory_id: str, add: list[str] = None, remove: list[str] = None) -> bool:
     """更新标签"""
     init_db()
@@ -363,43 +427,90 @@ def get_stats() -> dict:
 
 
 def get_graph_data(private: bool = False) -> dict:
-    """生成关系图数据（节点 + 边）"""
+    """生成关系图数据（二部图：记忆节点 + 标签节点 + 连线）"""
     init_db()
     with get_conn() as conn:
-        memories = conn.execute(
-            "SELECT id, summary, importance FROM memories WHERE private = ? AND archived = 0",
+        rows = conn.execute(
+            """SELECT m.id, m.summary, m.importance, l.name, l.type
+               FROM memories m
+               JOIN labels l ON m.id = l.memory_id
+               WHERE m.archived = 0 AND m.private = ?""",
             (int(private),),
         ).fetchall()
 
-        labels_rows = conn.execute(
-            """SELECT l.memory_id, l.name FROM labels l
-               JOIN memories m ON l.memory_id = m.id
-               WHERE m.private = ? AND m.archived = 0""",
-            (int(private),),
-        ).fetchall()
-
-    # 构建 label -> [memory_ids] 映射
-    label_to_mids: dict[str, list[str]] = {}
-    for row in labels_rows:
-        label_to_mids.setdefault(row["name"], []).append(row["memory_id"])
-
-    nodes = [
-        {"id": r["id"], "label": r["summary"][:30], "importance": r["importance"]}
-        for r in memories
-    ]
-
-    # 共享 label 的记忆之间建边
+    nodes = []
     edges = []
-    seen = set()
-    for label, mids in label_to_mids.items():
-        if len(mids) < 2:
-            continue
-        for i in range(len(mids)):
-            for j in range(i + 1, min(i + 5, len(mids))):
-                edge_key = tuple(sorted([mids[i], mids[j]]))
-                if edge_key not in seen:
-                    seen.add(edge_key)
-                    edges.append({"source": mids[i], "target": mids[j], "label": label})
+    label_nodes = {}
+    memory_set = set()
 
+    for row in rows:
+        mid = row["id"]
+        if mid not in memory_set:
+            memory_set.add(mid)
+            nodes.append({
+                "id": mid,
+                "label": row["summary"][:30],
+                "type": "memory",
+                "importance": row["importance"],
+            })
+
+        label_name = row["name"]
+        if label_name not in label_nodes:
+            label_nodes[label_name] = {
+                "id": f"label:{label_name}",
+                "label": label_name,
+                "type": row["type"],
+            }
+
+        edges.append({"source": mid, "target": f"label:{label_name}"})
+
+    nodes.extend(label_nodes.values())
     return {"nodes": nodes, "edges": edges}
+
+
+# ═══════════════════════════════════════════════════════════
+# IMPORT / EXPORT
+# ═══════════════════════════════════════════════════════════
+
+
+def export_memories(private: bool = False, include_archived: bool = False) -> list[dict]:
+    """导出所有记忆为 JSON 可序列化的 dict 列表"""
+    init_db()
+    with get_conn() as conn:
+        sql = "SELECT * FROM memories WHERE private = ?"
+        params: list = [int(private)]
+        if not include_archived:
+            sql += " AND archived = 0"
+        sql += " ORDER BY created_at ASC"
+        rows = conn.execute(sql, params).fetchall()
+
+        results = []
+        for row in rows:
+            d = _row_to_dict(row, include_content=True)
+            labels = conn.execute(
+                "SELECT name, type FROM labels WHERE memory_id = ?", (row["id"],)
+            ).fetchall()
+            d["tags"] = [l["name"] for l in labels if l["type"] == "tag"]
+            d["links"] = [l["name"] for l in labels if l["type"] == "link"]
+            results.append(d)
+    return results
+
+
+def import_memories(data: list[dict]) -> dict:
+    """从 JSON 列表导入记忆，返回统计"""
+    init_db()
+    imported = 0
+    skipped = 0
+    for item in data:
+        content = item.get("content", "")
+        if not content:
+            skipped += 1
+            continue
+        mid = item.get("id") or str(uuid.uuid4())
+        tags = item.get("tags", [])
+        source = item.get("source", "imported")
+        private = item.get("private", False)
+        store(content=content, tags=tags, source=source, private=private, memory_id=mid)
+        imported += 1
+    return {"imported": imported, "skipped": skipped}
 

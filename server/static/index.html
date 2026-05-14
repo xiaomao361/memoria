@@ -105,6 +105,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Segoe UI'
 .graph-toolbar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
 .graph-toolbar .info { color: var(--text-muted); font-size: 12px; margin-left: auto; }
 
+/* Tooltip */
+.graph-tooltip { position: fixed; background: var(--bg-secondary); border: 1px solid var(--border-hover); border-radius: 8px; padding: 8px 12px; font-size: 12px; color: var(--text-primary); pointer-events: none; z-index: 100; max-width: 280px; box-shadow: var(--shadow); opacity: 0; transition: opacity 0.1s; }
+.graph-tooltip.show { opacity: 1; }
+.graph-tooltip .tt-label { color: var(--text-muted); font-size: 11px; }
+.graph-tooltip .tt-type { font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-left: 6px; }
+.graph-tooltip .tt-type-memory { background: var(--accent-dim); color: var(--accent); }
+.graph-tooltip .tt-type-tag { background: var(--orange-dim); color: var(--orange); }
+.graph-tooltip .tt-type-link { background: var(--green-dim); color: var(--green); }
+
 /* Utilities */
 .hidden { display: none; }
 .empty-state { color: var(--text-muted); text-align: center; padding: 40px; font-size: 14px; }
@@ -153,6 +162,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Segoe UI'
         <span class="info" id="graph-info">加载中...</span>
       </div>
       <canvas id="graph-canvas"></canvas>
+      <div class="graph-tooltip" id="graph-tooltip"></div>
     </div>
     <div id="view-labels" class="hidden">
       <div class="page-title">标签</div>
@@ -161,6 +171,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Segoe UI'
     <div id="view-recent" class="hidden">
       <div class="page-title">全部记忆</div>
       <div class="memory-list" id="all-list"></div>
+      <div style="text-align:center;margin-top:16px" id="load-more-wrap">
+        <button class="btn" onclick="loadMore()">加载更多</button>
+      </div>
     </div>
     <div id="view-private" class="hidden">
       <div class="private-gate" id="private-gate">
@@ -235,9 +248,23 @@ async function searchByLabel(name) {
   document.getElementById('search-results').innerHTML = `<div style="margin-bottom:12px;color:var(--text-muted);font-size:13px">标签: <span class="tag tag-default">${name}</span> · ${data.count} 条结果</div>` + renderList(data.memories);
 }
 
+let recentOffset = 0;
+const PAGE_SIZE = 50;
+
 async function loadRecent() {
-  const data = await fetch(API + '/api/memories?limit=50').then(r => r.json());
+  recentOffset = 0;
+  const data = await fetch(API + `/api/memories?limit=${PAGE_SIZE}&offset=0`).then(r => r.json());
   document.getElementById('all-list').innerHTML = renderList(data.memories);
+  document.getElementById('load-more-wrap').style.display = data.count < PAGE_SIZE ? 'none' : '';
+  recentOffset = data.count;
+}
+
+async function loadMore() {
+  const data = await fetch(API + `/api/memories?limit=${PAGE_SIZE}&offset=${recentOffset}`).then(r => r.json());
+  const list = document.getElementById('all-list');
+  list.innerHTML += renderList(data.memories);
+  document.getElementById('load-more-wrap').style.display = data.count < PAGE_SIZE ? 'none' : '';
+  recentOffset += data.count;
 }
 
 function unlockPrivate() {
@@ -270,7 +297,8 @@ async function showDetail(id) {
     <div class="detail-content">${escapeHtml(data.content || '')}</div>
     <div class="detail-actions">
       <button class="btn" onclick="showView('${currentView}')">返回</button>
-      <button class="btn btn-danger" onclick="deleteMemory('${data.id}')">删除</button>
+      ${data.archived ? `<button class="btn btn-primary" onclick="restoreMemory('${data.id}')">恢复</button>` : ''}
+      ${data.archived ? `<button class="btn btn-danger" onclick="purgeMemory('${data.id}')">永久删除</button>` : `<button class="btn btn-danger" onclick="deleteMemory('${data.id}')">删除</button>`}
     </div>
   `;
 }
@@ -278,6 +306,17 @@ async function showDetail(id) {
 async function deleteMemory(id) {
   if (!confirm('确定要删除这条记忆吗？')) return;
   await fetch(API + `/api/memories/${id}`, {method: 'DELETE'});
+  showView(currentView);
+}
+
+async function restoreMemory(id) {
+  await fetch(API + `/api/memories/${id}/restore`, {method: 'POST'});
+  showView(currentView);
+}
+
+async function purgeMemory(id) {
+  if (!confirm('永久删除不可恢复，确定吗？')) return;
+  await fetch(API + `/api/memories/${id}?purge=true`, {method: 'DELETE'});
   showView(currentView);
 }
 
@@ -324,6 +363,7 @@ async function loadGraph(priv) {
 
 function initCanvas() {
   const canvas = document.getElementById('graph-canvas');
+  const tooltip = document.getElementById('graph-tooltip');
   const rect = canvas.parentElement.getBoundingClientRect();
   canvas.width = rect.width;
   canvas.height = Math.max(560, window.innerHeight - 200);
@@ -336,11 +376,27 @@ function initCanvas() {
     else { gDrag = {pan:true, sx:e.offsetX, sy:e.offsetY, ox:gOffset.x, oy:gOffset.y}; }
   };
   canvas.onmousemove = e => {
-    if (!gDrag) return;
-    if (gDrag.pan) { gOffset.x = gDrag.ox + e.offsetX - gDrag.sx; gOffset.y = gDrag.oy + e.offsetY - gDrag.sy; }
-    else { gDrag.x = (e.offsetX - gOffset.x)/gScale; gDrag.y = (e.offsetY - gOffset.y)/gScale; }
+    if (gDrag) {
+      if (gDrag.pan) { gOffset.x = gDrag.ox + e.offsetX - gDrag.sx; gOffset.y = gDrag.oy + e.offsetY - gDrag.sy; }
+      else { gDrag.x = (e.offsetX - gOffset.x)/gScale; gDrag.y = (e.offsetY - gOffset.y)/gScale; }
+      return;
+    }
+    const mx = (e.offsetX - gOffset.x)/gScale, my = (e.offsetY - gOffset.y)/gScale;
+    const hit = graphNodes.find(n => Math.hypot(n.x-mx, n.y-my) < n.r+5);
+    if (hit) {
+      canvas.style.cursor = 'pointer';
+      const typeLabel = hit.type === 'memory' ? '记忆' : (hit.type === 'tag' ? '标签' : '链接');
+      tooltip.innerHTML = `<div>${escapeHtml(hit.label)}<span class="tt-type tt-type-${hit.type}">${typeLabel}</span></div>`;
+      tooltip.style.left = (e.clientX + 12) + 'px';
+      tooltip.style.top = (e.clientY - 8) + 'px';
+      tooltip.classList.add('show');
+    } else {
+      canvas.style.cursor = 'grab';
+      tooltip.classList.remove('show');
+    }
   };
-  canvas.onmouseup = () => { if(gDrag && !gDrag.pan) gDrag.fixed=false; gDrag=null; canvas.style.cursor='grab'; };
+  canvas.onmouseup = () => { if(gDrag && !gDrag.pan) gDrag.fixed=false; gDrag=null; canvas.style.cursor='grab'; tooltip.classList.remove('show'); };
+  canvas.onmouseleave = () => { tooltip.classList.remove('show'); };
   canvas.onwheel = e => { e.preventDefault(); gScale *= e.deltaY > 0 ? 0.92 : 1.08; };
   canvas.ondblclick = e => {
     const mx = (e.offsetX - gOffset.x)/gScale, my = (e.offsetY - gOffset.y)/gScale;

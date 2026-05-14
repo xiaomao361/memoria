@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from memoria.core import store, recall, get_memory, delete_memory, update_tags, get_labels, get_stats
+from memoria.core import store, recall, get_memory, delete_memory, restore_memory, purge_memory, update_tags, get_labels, get_stats, export_memories, import_memories
 
 
 def cmd_store(args):
@@ -78,8 +78,17 @@ def cmd_labels(args):
 
 
 def cmd_delete(args):
-    ok = delete_memory(args.id)
-    print(json.dumps({"id": args.id, "deleted": ok}))
+    if args.purge:
+        ok = purge_memory(args.id)
+        print(json.dumps({"id": args.id, "purged": ok}))
+    else:
+        ok = delete_memory(args.id)
+        print(json.dumps({"id": args.id, "deleted": ok}))
+
+
+def cmd_restore(args):
+    ok = restore_memory(args.id)
+    print(json.dumps({"id": args.id, "restored": ok}))
 
 
 def cmd_tag(args):
@@ -113,6 +122,23 @@ def cmd_maintain(args):
     else:
         print(f"Unknown action: {args.action}")
         sys.exit(1)
+
+
+def cmd_export(args):
+    data = export_memories(private=args.private, include_archived=args.include_archived)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(json.dumps({"exported": len(data), "file": args.output}))
+    else:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def cmd_import(args):
+    with open(args.file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    result = import_memories(data)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def main():
@@ -157,7 +183,13 @@ def main():
     # delete
     p_del = sub.add_parser("delete", help="删除记忆（软删除）")
     p_del.add_argument("id", help="记忆 ID")
+    p_del.add_argument("--purge", action="store_true", help="永久删除（不可恢复）")
     p_del.set_defaults(func=cmd_delete)
+
+    # restore
+    p_restore = sub.add_parser("restore", help="恢复已归档记忆")
+    p_restore.add_argument("id", help="记忆 ID")
+    p_restore.set_defaults(func=cmd_restore)
 
     # tag
     p_tag = sub.add_parser("tag", help="管理标签")
@@ -172,6 +204,18 @@ def main():
     p_maint.add_argument("--limit", type=int, default=10)
     p_maint.add_argument("--dry-run", action="store_true")
     p_maint.set_defaults(func=cmd_maintain)
+
+    # export
+    p_export = sub.add_parser("export", help="导出记忆为 JSON")
+    p_export.add_argument("-o", "--output", default=None, help="输出文件路径（默认 stdout）")
+    p_export.add_argument("--private", action="store_true", help="导出私密记忆")
+    p_export.add_argument("--include-archived", action="store_true", help="包含已归档")
+    p_export.set_defaults(func=cmd_export)
+
+    # import
+    p_import = sub.add_parser("import", help="从 JSON 导入记忆")
+    p_import.add_argument("file", help="JSON 文件路径")
+    p_import.set_defaults(func=cmd_import)
 
     args = parser.parse_args()
     if not args.command:
