@@ -123,6 +123,29 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py tag <uuid> --add "ne
 
 ---
 
+## 治理三轴
+
+| 轴 | 动作 | 命令 | 决策方 |
+|------|----|------|------|
+| 强度 | 升 | `maintain recompute-importance` | 自动 |
+| 强度 | 降 | `maintain dormant` | 自动 |
+| 数量 | 合 | `maintain suggest-merge` → `store --merge-from` | LLM 判断 |
+| 数量 | 删 | `delete` / `delete --purge` | LLM / 人工 |
+| 内容 | 改 | `maintain suggest-conflicts` → `tag --add outdated` 或重写 | LLM 判断 |
+
+`maintain nightly` 一次性跑完自动部分，产出待裁决候选清单。
+
+### 推荐 cron
+
+```bash
+# 每天凌晨 3 点
+0 3 * * *  conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain nightly > ~/.qclaw/memoria/logs/nightly-$(date +\%F).json 2>&1
+```
+
+外部 agent（openclaw 等）读取 JSON 中的 `review` 部分，二次裁决后通过 store/delete/tag 命令落地。
+
+---
+
 ## 维护
 
 ```bash
@@ -135,7 +158,37 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain suggest-mer
 # 沉睡降权（>30天未召回的记忆标记为 archived）
 conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain dormant
 conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain dormant --dry-run
+
+# 重要度重算（基于 recall_count + 时效衰减）
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain recompute-importance
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain recompute-importance --half-life 30 --dry-run
+
+# 冲突候选（同标签 + 中等相似度 + 时间跨度大，仅产清单）
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain suggest-conflicts
+
+# 一键夜间维护：自动跑 importance + dormant，并产出 merge / conflict 候选清单
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain nightly
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain nightly --dry-run
 ```
+
+### nightly 输出结构
+
+```json
+{
+  "ran_at": "...",
+  "dry_run": false,
+  "auto": {
+    "importance": { "scanned": N, "updated": N, "top": [...] },
+    "dormant":    { "count": N, "samples": [...] }
+  },
+  "review": {
+    "merge_candidates":    [{ "ids": [...], "score": 0.90, "summaries": [...] }],
+    "conflict_candidates": [{ "older": id, "newer": id, "score": 0.78, "gap_days": 25, "shared_labels": [...] }]
+  }
+}
+```
+
+`auto` 部分 CLI 自动执行；`review` 部分需要外部 LLM agent 二次判断后通过 `store --merge-from` / `delete` / `tag` 落地。
 
 ---
 

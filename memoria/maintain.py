@@ -1,6 +1,7 @@
-"""维护任务 - 重建索引 / 沉睡降权 / 合并候选"""
+"""维护任务 - 重建索引 / 沉睡降权 / 合并候选 / 重要度重算"""
 
 import json
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -84,7 +85,7 @@ def rebuild() -> dict:
     return {"imported": imported, "errors": errors}
 
 
-def suggest_merge(limit: int = 10) -> list[dict]:
+def suggest_merge(limit: int = 10, private: bool = False, threshold: float = 0.85) -> list[dict]:
     """基于向量相似度找出可能可以合并的记忆候选"""
     init_db()
     candidates = []
@@ -92,25 +93,32 @@ def suggest_merge(limit: int = 10) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT id, summary, content FROM memories
-               WHERE archived = 0 ORDER BY created_at DESC LIMIT 100"""
+               WHERE archived = 0 AND private = ?
+               ORDER BY created_at DESC LIMIT 100""",
+            (int(private),),
         ).fetchall()
+        summary_map = {r["id"]: r["summary"] for r in rows}
 
     seen_pairs = set()
     for row in rows:
-        similar = search_vectors(row["summary"], limit=5, private=False)
+        similar = search_vectors(row["summary"], limit=5, private=private)
         for s in similar:
             if s["id"] == row["id"]:
                 continue
-            if s["score"] < 0.85:
+            if s["score"] < threshold:
                 continue
             pair = tuple(sorted([row["id"], s["id"]]))
             if pair in seen_pairs:
                 continue
             seen_pairs.add(pair)
+            other_summary = summary_map.get(s["id"]) or _fetch_summary(s["id"])
             candidates.append({
                 "ids": list(pair),
-                "score": s["score"],
-                "summaries": [row["summary"][:80]],
+                "score": round(s["score"], 4),
+                "summaries": [
+                    row["summary"][:120],
+                    (other_summary or "")[:120],
+                ],
             })
             if len(candidates) >= limit:
                 break
@@ -118,6 +126,14 @@ def suggest_merge(limit: int = 10) -> list[dict]:
             break
 
     return candidates
+
+
+def _fetch_summary(memory_id: str) -> Optional[str]:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT summary FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        return row["summary"] if row else None
 
 
 def dormant_sweep(dry_run: bool = True) -> dict:
@@ -129,8 +145,10 @@ def dormant_sweep(dry_run: bool = True) -> dict:
         rows = conn.execute(
             """SELECT id, summary, last_recalled_at, created_at FROM memories
                WHERE archived = 0
-               AND (last_recalled_at IS NOT NULL AND last_recalled_at < ?)
-               OR  (last_recalled_at IS NULL AND created_at < ?)""",
+               AND (
+                   (last_recalled_at IS NOT NULL AND last_recalled_at < ?)
+                   OR (last_recalled_at IS NULL AND created_at < ?)
+               )""",
             (threshold, threshold),
         ).fetchall()
 
@@ -145,3 +163,180 @@ def dormant_sweep(dry_run: bool = True) -> dict:
                 delete_vector(row["id"])
 
     return {"dry_run": dry_run, "count": len(demoted), "samples": demoted[:10]}
+
+
+def recompute_importance(dry_run: bool = False, half_life_days: int = 30) -> dict:
+    """
+    根据 recall_count 和 last_recalled_at 重算 importance。
+
+    公式: importance = log1p(recall_count) * exp(-age_days / half_life_days)
+    其中 age_days = 距离 last_recalled_at（无则取 created_at）的天数
+    最终 clip 到 [0, 1]。
+    """
+    init_db()
+    now = datetime.now(timezone.utc)
+    updated = []
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT id, recall_count, last_recalled_at, created_at, importance
+               FROM memories WHERE archived = 0"""
+        ).fetchall()
+
+        for row in rows:
+            ref_ts = row["last_recalled_at"] or row["created_at"]
+            try:
+                ref_dt = datetime.fromisoformat(ref_ts.replace("Z", "+00:00"))
+                if ref_dt.tzinfo is None:
+                    ref_dt = ref_dt.replace(tzinfo=timezone.utc)
+            except (ValueError, AttributeError):
+                continue
+
+            age_days = max((now - ref_dt).total_seconds() / 86400, 0)
+            recall_factor = math.log1p(row["recall_count"] or 0)
+            decay = math.exp(-age_days / half_life_days)
+            new_imp = round(min(recall_factor * decay, 1.0), 4)
+
+            old_imp = round(row["importance"] or 0.0, 4)
+            if abs(new_imp - old_imp) < 1e-4:
+                continue
+
+            updated.append({
+                "id": row["id"],
+                "old": old_imp,
+                "new": new_imp,
+                "recall_count": row["recall_count"],
+                "age_days": round(age_days, 1),
+            })
+            if not dry_run:
+                conn.execute(
+                    "UPDATE memories SET importance = ? WHERE id = ?",
+                    (new_imp, row["id"]),
+                )
+
+    updated.sort(key=lambda x: x["new"], reverse=True)
+    return {
+        "dry_run": dry_run,
+        "scanned": len(rows),
+        "updated": len(updated),
+        "top": updated[:10],
+    }
+
+
+def suggest_conflicts(
+    limit: int = 20,
+    private: bool = False,
+    min_similarity: float = 0.75,
+    max_similarity: float = 0.93,
+    min_age_gap_days: int = 14,
+) -> list[dict]:
+    """
+    找出可能存在内容冲突 / 演进版本的记忆候选。
+
+    启发式:
+      - 同标签或同链接（共享至少一个 label）
+      - 向量相似度落在 [min_similarity, max_similarity]：相关但非重复
+      - 创建时间间隔 > min_age_gap_days：可能是新版覆盖旧版
+    输出候选清单，由外部 LLM 判断是否真冲突。
+    """
+    init_db()
+    candidates = []
+    seen_pairs = set()
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """SELECT id, summary, created_at FROM memories
+               WHERE archived = 0 AND private = ?
+               ORDER BY created_at DESC LIMIT 200""",
+            (int(private),),
+        ).fetchall()
+        recent_ids = {r["id"] for r in rows}
+        meta_map = {r["id"]: dict(r) for r in rows}
+
+        for row in rows:
+            similar = search_vectors(row["summary"], limit=8, private=private)
+            for s in similar:
+                if s["id"] == row["id"]:
+                    continue
+                if not (min_similarity <= s["score"] <= max_similarity):
+                    continue
+                pair = tuple(sorted([row["id"], s["id"]]))
+                if pair in seen_pairs:
+                    continue
+
+                other = meta_map.get(s["id"])
+                if not other:
+                    other_row = conn.execute(
+                        "SELECT id, summary, created_at FROM memories WHERE id = ? AND archived = 0",
+                        (s["id"],),
+                    ).fetchone()
+                    if not other_row:
+                        continue
+                    other = dict(other_row)
+
+                try:
+                    a_dt = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
+                    b_dt = datetime.fromisoformat(other["created_at"].replace("Z", "+00:00"))
+                except (ValueError, AttributeError):
+                    continue
+                gap_days = abs((a_dt - b_dt).total_seconds()) / 86400
+                if gap_days < min_age_gap_days:
+                    continue
+
+                a_labels = {
+                    r["name"] for r in conn.execute(
+                        "SELECT name FROM labels WHERE memory_id = ?", (row["id"],)
+                    ).fetchall()
+                }
+                b_labels = {
+                    r["name"] for r in conn.execute(
+                        "SELECT name FROM labels WHERE memory_id = ?", (s["id"],)
+                    ).fetchall()
+                }
+                shared = a_labels & b_labels
+                if not shared:
+                    continue
+
+                seen_pairs.add(pair)
+                older_id, newer_id = (
+                    (row["id"], s["id"]) if a_dt < b_dt else (s["id"], row["id"])
+                )
+                candidates.append({
+                    "older": older_id,
+                    "newer": newer_id,
+                    "score": round(s["score"], 4),
+                    "gap_days": round(gap_days, 1),
+                    "shared_labels": sorted(shared),
+                    "summaries": {
+                        older_id: meta_map.get(older_id, other)["summary"][:120],
+                        newer_id: meta_map.get(newer_id, other)["summary"][:120],
+                    },
+                })
+                if len(candidates) >= limit:
+                    return candidates
+
+    return candidates
+
+
+def nightly(dry_run: bool = False) -> dict:
+    """
+    每晚一次性维护：
+      自动: importance 重算 + dormant 归档
+      候选: merge / conflict（仅产清单，由外部 LLM 决策）
+    """
+    started = datetime.now(timezone.utc).isoformat()
+    report = {
+        "ran_at": started,
+        "dry_run": dry_run,
+        "auto": {
+            "importance": recompute_importance(dry_run=dry_run),
+            "dormant": dormant_sweep(dry_run=dry_run),
+        },
+        "review": {
+            "merge_candidates": suggest_merge(limit=20, private=False)
+                + [{**c, "_private": True} for c in suggest_merge(limit=20, private=True)],
+            "conflict_candidates": suggest_conflicts(limit=20, private=False)
+                + [{**c, "_private": True} for c in suggest_conflicts(limit=20, private=True)],
+        },
+    }
+    return report

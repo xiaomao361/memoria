@@ -141,6 +141,7 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/server/app.py --port 8000
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v6.4 | 2026-05-15 | 治理三轴：importance 重算 + suggest-conflicts + nightly 一键维护；修复 dormant SQL 优先级 bug |
 | v6.3 | 2026-05-14 | 合并记忆标签迁移；graph 统一到 core；Web 分页；restore/purge；图谱 hover；export/import |
 | v6.2 | 2026-05-13 | 标签过滤（排除私密+归档）；标签大小写统一；Web 标签页全量加载 |
 | v6.1 | 2026-05-13 | Web 管理界面优化（中文化 + 图谱集成 + UI 美化） |

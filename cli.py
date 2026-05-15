@@ -108,20 +108,24 @@ def cmd_get(args):
 
 
 def cmd_maintain(args):
-    from memoria.maintain import rebuild, suggest_merge, dormant_sweep
+    from memoria.maintain import rebuild, suggest_merge, dormant_sweep, recompute_importance, suggest_conflicts, nightly
 
     if args.action == "rebuild":
         result = rebuild()
-        print(json.dumps(result, ensure_ascii=False, indent=2))
     elif args.action == "suggest-merge":
-        results = suggest_merge(limit=args.limit)
-        print(json.dumps(results, ensure_ascii=False, indent=2))
+        result = suggest_merge(limit=args.limit)
     elif args.action == "dormant":
         result = dormant_sweep(dry_run=args.dry_run)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif args.action == "recompute-importance":
+        result = recompute_importance(dry_run=args.dry_run, half_life_days=args.half_life)
+    elif args.action == "suggest-conflicts":
+        result = suggest_conflicts(limit=args.limit)
+    elif args.action == "nightly":
+        result = nightly(dry_run=args.dry_run)
     else:
         print(f"Unknown action: {args.action}")
         sys.exit(1)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def cmd_export(args):
@@ -200,9 +204,13 @@ def main():
 
     # maintain
     p_maint = sub.add_parser("maintain", help="维护任务")
-    p_maint.add_argument("action", choices=["rebuild", "suggest-merge", "dormant"])
+    p_maint.add_argument("action", choices=[
+        "rebuild", "suggest-merge", "dormant",
+        "recompute-importance", "suggest-conflicts", "nightly",
+    ])
     p_maint.add_argument("--limit", type=int, default=10)
     p_maint.add_argument("--dry-run", action="store_true")
+    p_maint.add_argument("--half-life", type=int, default=30, help="importance 衰减半衰期（天）")
     p_maint.set_defaults(func=cmd_maintain)
 
     # export
