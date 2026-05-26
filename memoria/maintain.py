@@ -1,14 +1,21 @@
 """维护任务 - 重建索引 / 沉睡降权 / 合并候选 / 重要度重算"""
 
-import json
 import math
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from .config import STORE_DIR, DORMANT_DAYS
 from .db import get_conn, init_db
-from .vector import upsert_vector, search_vectors, delete_vector
-from .filestore import list_all_files, parse_memory_file, extract_links
+from .vector import upsert_vector, search_vectors, delete_vector, reset_collection
+from .filestore import list_all_files, parse_memory_file, extract_links, update_file_metadata
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 def rebuild() -> dict:
@@ -20,6 +27,8 @@ def rebuild() -> dict:
         conn.execute("DELETE FROM memories")
         conn.execute("DELETE FROM labels")
         conn.execute("DELETE FROM memories_fts")
+    reset_collection(private=False)
+    reset_collection(private=True)
 
     imported = 0
     errors = 0
@@ -41,6 +50,7 @@ def rebuild() -> dict:
                 links = meta.get("links", []) or extract_links(content)
                 source = meta.get("source", "migrated")
                 created = meta.get("created", meta.get("created_at", ""))
+                archived = _as_bool(meta.get("archived", False))
 
                 # 计算相对路径
                 if private:
@@ -55,8 +65,8 @@ def rebuild() -> dict:
                         """INSERT OR REPLACE INTO memories
                            (id, summary, content, source, created_at, importance,
                             private, archived, file_path)
-                           VALUES (?, ?, ?, ?, ?, 0.0, ?, 0, ?)""",
-                        (mid, summary, content, source, created, int(private), file_path),
+                           VALUES (?, ?, ?, ?, ?, 0.0, ?, ?, ?)""",
+                        (mid, summary, content, source, created, int(private), int(archived), file_path),
                     )
                     for tag in tags:
                         conn.execute(
@@ -74,8 +84,9 @@ def rebuild() -> dict:
                     )
 
                 # 向量
-                embed_text = f"{summary}\n{content}"
-                upsert_vector(mid, embed_text, private=private)
+                if not archived:
+                    embed_text = f"{summary}\n{content}"
+                    upsert_vector(mid, embed_text, private=private)
                 imported += 1
 
             except Exception as e:
@@ -143,7 +154,7 @@ def dormant_sweep(dry_run: bool = True) -> dict:
 
     with get_conn() as conn:
         rows = conn.execute(
-            """SELECT id, summary, last_recalled_at, created_at FROM memories
+            """SELECT id, summary, last_recalled_at, created_at, private, file_path FROM memories
                WHERE archived = 0
                AND (
                    (last_recalled_at IS NOT NULL AND last_recalled_at < ?)
@@ -160,7 +171,9 @@ def dormant_sweep(dry_run: bool = True) -> dict:
                     "UPDATE memories SET archived = 1, updated_at = ? WHERE id = ?",
                     (datetime.now(timezone.utc).isoformat(), row["id"]),
                 )
-                delete_vector(row["id"])
+                if row["file_path"]:
+                    update_file_metadata(row["file_path"], archived=True)
+                delete_vector(row["id"], private=bool(row["private"]))
 
     return {"dry_run": dry_run, "count": len(demoted), "samples": demoted[:10]}
 
@@ -250,7 +263,6 @@ def suggest_conflicts(
                ORDER BY created_at DESC LIMIT 200""",
             (int(private),),
         ).fetchall()
-        recent_ids = {r["id"] for r in rows}
         meta_map = {r["id"]: dict(r) for r in rows}
 
         for row in rows:

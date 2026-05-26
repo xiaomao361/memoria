@@ -2,13 +2,12 @@
 
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 from .config import STORE_DIR
 from .db import get_conn, init_db
 from .vector import upsert_vector, search_vectors, delete_vector
-from .filestore import write_file, extract_links
+from .filestore import write_file, extract_links, update_file_metadata
 
 
 def _now() -> str:
@@ -28,6 +27,40 @@ def _extract_summary(content: str) -> str:
     return content[:200]
 
 
+def _normalize_labels(labels: Optional[list[str]]) -> list[str]:
+    """规范化标签/链接并保持输入顺序去重"""
+    seen = set()
+    out = []
+    for label in labels or []:
+        name = label.lower().strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def _sync_file_labels(conn, memory_id: str) -> None:
+    row = conn.execute(
+        "SELECT file_path, source, private, archived FROM memories WHERE id = ?",
+        (memory_id,),
+    ).fetchone()
+    if not row or not row["file_path"]:
+        return
+    labels = conn.execute(
+        "SELECT name, type FROM labels WHERE memory_id = ? ORDER BY type, name",
+        (memory_id,),
+    ).fetchall()
+    update_file_metadata(
+        row["file_path"],
+        tags=[l["name"] for l in labels if l["type"] == "tag"],
+        links=[l["name"] for l in labels if l["type"] == "link"],
+        source=row["source"],
+        private=bool(row["private"]),
+        archived=bool(row["archived"]),
+    )
+
+
 # ═══════════════════════════════════════════════════════════
 # STORE
 # ═══════════════════════════════════════════════════════════
@@ -40,6 +73,8 @@ def store(
     private: bool = False,
     memory_id: Optional[str] = None,
     merge_from: Optional[list[str]] = None,
+    created_at: Optional[str] = None,
+    archived: bool = False,
 ) -> dict:
     """
     写入一条记忆。
@@ -49,10 +84,19 @@ def store(
     init_db()
 
     mid = memory_id or str(uuid.uuid4())
-    tags = [t.lower().strip() for t in (tags or [])]
-    links = [l.lower().strip() for l in extract_links(content)]
+    tags = _normalize_labels(tags)
+    links = _normalize_labels(extract_links(content))
     summary = _extract_summary(content)
     now = _now()
+
+    with get_conn() as conn:
+        existing = conn.execute(
+            """SELECT created_at, recall_count, last_recalled_at, importance,
+                      private, file_path
+               FROM memories WHERE id = ?""",
+            (mid,),
+        ).fetchone()
+    stored_created_at = existing["created_at"] if existing else (created_at or now)
 
     # 1. 写文件
     file_path = write_file(
@@ -63,17 +107,28 @@ def store(
         links=links,
         source=source,
         private=private,
+        created_at=stored_created_at,
+        archived=archived,
     )
 
     # 2. 写 SQLite
     with get_conn() as conn:
-        conn.execute(
-            """INSERT OR REPLACE INTO memories
-               (id, summary, content, source, created_at, updated_at,
-                importance, private, archived, file_path)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
-            (mid, summary, content, source, now, now, 0.0, int(private), file_path),
-        )
+        if existing:
+            conn.execute(
+                """UPDATE memories SET
+                   summary = ?, content = ?, source = ?, updated_at = ?,
+                   private = ?, archived = ?, file_path = ?
+                   WHERE id = ?""",
+                (summary, content, source, now, int(private), int(archived), file_path, mid),
+            )
+        else:
+            conn.execute(
+                """INSERT INTO memories
+                   (id, summary, content, source, created_at, updated_at,
+                    importance, private, archived, file_path)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (mid, summary, content, source, stored_created_at, now, 0.0, int(private), int(archived), file_path),
+            )
         # labels
         conn.execute("DELETE FROM labels WHERE memory_id = ?", (mid,))
         for tag in tags:
@@ -93,15 +148,33 @@ def store(
             (mid, summary, content),
         )
 
+    if existing:
+        old_private = bool(existing["private"])
+        old_file_path = existing["file_path"]
+        if old_private != private:
+            delete_vector(mid, private=old_private)
+        if old_file_path and old_file_path != file_path:
+            old_path = STORE_DIR / old_file_path
+            if old_path.exists():
+                old_path.unlink()
+
     # 3. 写向量
     embed_text = f"{summary}\n{content}"
-    vec_ok = upsert_vector(mid, embed_text, private=private)
+    if archived:
+        delete_vector(mid, private=private)
+        vec_ok = True
+    else:
+        vec_ok = upsert_vector(mid, embed_text, private=private)
 
     # 4. 如果是合并操作：迁移标签 + 标记原始记忆为 archived
     if merge_from:
         with get_conn() as conn:
             for old_id in merge_from:
                 # 迁移旧记忆的标签到新记忆
+                old_row = conn.execute(
+                    "SELECT private, file_path FROM memories WHERE id = ?",
+                    (old_id,),
+                ).fetchone()
                 old_labels = conn.execute(
                     "SELECT name, type FROM labels WHERE memory_id = ?",
                     (old_id,),
@@ -116,6 +189,11 @@ def store(
                     "UPDATE memories SET archived = 1, updated_at = ? WHERE id = ?",
                     (now, old_id),
                 )
+                if old_row:
+                    if old_row["file_path"]:
+                        update_file_metadata(old_row["file_path"], archived=True)
+                    delete_vector(old_id, private=bool(old_row["private"]))
+            _sync_file_labels(conn, mid)
 
     return {
         "id": mid,
@@ -310,11 +388,18 @@ def delete_memory(memory_id: str) -> bool:
     """标记为 archived（软删除）"""
     init_db()
     with get_conn() as conn:
+        row = conn.execute(
+            "SELECT private, file_path FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if not row:
+            return False
         conn.execute(
             "UPDATE memories SET archived = 1, updated_at = ? WHERE id = ?",
             (_now(), memory_id),
         )
-    delete_vector(memory_id)
+    if row["file_path"]:
+        update_file_metadata(row["file_path"], archived=True)
+    delete_vector(memory_id, private=bool(row["private"]))
     return True
 
 
@@ -335,6 +420,9 @@ def restore_memory(memory_id: str) -> bool:
         private = bool(row["private"])
         summary = row["summary"]
 
+    if file_path:
+        update_file_metadata(file_path, archived=False)
+
     # 重新写入向量
     if file_path:
         from .filestore import read_file
@@ -350,7 +438,7 @@ def purge_memory(memory_id: str) -> bool:
     init_db()
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT file_path FROM memories WHERE id = ?", (memory_id,)
+            "SELECT file_path, private FROM memories WHERE id = ?", (memory_id,)
         ).fetchone()
         if not row:
             return False
@@ -359,7 +447,7 @@ def purge_memory(memory_id: str) -> bool:
         conn.execute("DELETE FROM memories_fts WHERE id = ?", (memory_id,))
         conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
     # 删向量
-    delete_vector(memory_id)
+    delete_vector(memory_id, private=bool(row["private"]))
     # 删文件
     if row["file_path"]:
         filepath = STORE_DIR / row["file_path"]
@@ -372,21 +460,30 @@ def update_tags(memory_id: str, add: list[str] = None, remove: list[str] = None)
     """更新标签"""
     init_db()
     with get_conn() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM memories WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if not exists:
+            return False
         if remove:
             for tag in remove:
                 conn.execute(
                     "DELETE FROM labels WHERE memory_id = ? AND name = ?",
-                    (memory_id, tag.lower()),
+                    (memory_id, tag.lower().strip()),
                 )
         if add:
             for tag in add:
+                name = tag.lower().strip()
+                if not name:
+                    continue
                 conn.execute(
                     "INSERT OR IGNORE INTO labels (memory_id, name, type) VALUES (?, ?, 'tag')",
-                    (memory_id, tag.lower()),
+                    (memory_id, name),
                 )
         conn.execute(
             "UPDATE memories SET updated_at = ? WHERE id = ?", (_now(), memory_id)
         )
+        _sync_file_labels(conn, memory_id)
     return True
 
 
@@ -510,7 +607,16 @@ def import_memories(data: list[dict]) -> dict:
         tags = item.get("tags", [])
         source = item.get("source", "imported")
         private = item.get("private", False)
-        store(content=content, tags=tags, source=source, private=private, memory_id=mid)
+        created_at = item.get("created_at")
+        archived = item.get("archived", False)
+        store(
+            content=content,
+            tags=tags,
+            source=source,
+            private=private,
+            memory_id=mid,
+            created_at=created_at,
+            archived=archived,
+        )
         imported += 1
     return {"imported": imported, "skipped": skipped}
-

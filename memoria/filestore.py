@@ -20,6 +20,7 @@ def write_file(
     source: str,
     private: bool = False,
     created_at: Optional[str] = None,
+    archived: bool = False,
 ) -> str:
     """写入 store/*.md，返回相对路径"""
     now = created_at or datetime.now(timezone.utc).isoformat()
@@ -41,6 +42,7 @@ def write_file(
         f"tags: {json.dumps(tags, ensure_ascii=False)}\n"
         f"links: {json.dumps(links, ensure_ascii=False)}\n"
         f"private: {str(private).lower()}\n"
+        f"archived: {str(archived).lower()}\n"
         f"---\n\n"
     )
 
@@ -87,6 +89,38 @@ def parse_memory_file(text: str) -> Optional[dict]:
 
     meta["content"] = parts[2].strip()
     return meta
+
+
+def update_file_metadata(rel_path: str, **updates) -> bool:
+    """更新 store/*.md 的 front matter，保留正文内容"""
+    filepath = STORE_DIR / rel_path
+    if not filepath.exists():
+        return False
+
+    parsed = parse_memory_file(filepath.read_text(encoding="utf-8"))
+    if parsed is None:
+        return False
+
+    content = parsed.pop("content", "")
+    parsed.update(updates)
+    ordered_keys = ["id", "created", "source", "tags", "links", "private", "archived"]
+    keys = ordered_keys + sorted(k for k in parsed if k not in ordered_keys)
+
+    lines = ["---"]
+    for key in keys:
+        if key not in parsed:
+            continue
+        value = parsed[key]
+        if isinstance(value, list):
+            rendered = json.dumps(value, ensure_ascii=False)
+        elif isinstance(value, bool):
+            rendered = str(value).lower()
+        else:
+            rendered = str(value)
+        lines.append(f"{key}: {rendered}")
+    lines.extend(["---", "", content])
+    filepath.write_text("\n".join(lines), encoding="utf-8")
+    return True
 
 
 def extract_links(content: str) -> list[str]:

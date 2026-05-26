@@ -3,8 +3,6 @@
 import sys
 from typing import Optional
 
-import requests
-
 from .config import (
     OLLAMA_URL, EMBEDDING_MODEL, EMBEDDING_DIM, EMBEDDING_MAX_CHARS,
     VECTORS_DIR, CHROMA_COLLECTION, CHROMA_PRIVATE_COLLECTION,
@@ -14,6 +12,8 @@ from .config import (
 def get_embedding(text: str) -> Optional[list[float]]:
     """通过 Ollama 获取 bge-m3 embedding"""
     try:
+        import requests
+
         truncated = text[:EMBEDDING_MAX_CHARS]
         resp = requests.post(
             f"{OLLAMA_URL}/api/embeddings",
@@ -38,6 +38,29 @@ def _get_collection(private: bool = False):
         name=name,
         metadata={"hnsw:space": "cosine"},
     )
+
+
+def reset_collection(private: bool = False) -> bool:
+    """清空并重建向量 collection。用于 rebuild 避免陈旧向量残留。"""
+    try:
+        import chromadb
+
+        db_path = VECTORS_DIR / ("private" if private else "public")
+        db_path.mkdir(parents=True, exist_ok=True)
+        client = chromadb.PersistentClient(path=str(db_path))
+        name = CHROMA_PRIVATE_COLLECTION if private else CHROMA_COLLECTION
+        try:
+            client.delete_collection(name)
+        except Exception:
+            pass
+        client.get_or_create_collection(
+            name=name,
+            metadata={"hnsw:space": "cosine"},
+        )
+        return True
+    except Exception as e:
+        print(f"WARN: vector reset failed: {e}", file=sys.stderr)
+        return False
 
 
 def upsert_vector(memory_id: str, text: str, private: bool = False) -> bool:
