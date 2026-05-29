@@ -19,6 +19,16 @@ CREATE TABLE IF NOT EXISTS memories (
     importance REAL DEFAULT 0.0,
     private INTEGER DEFAULT 0,
     archived INTEGER DEFAULT 0,
+    kind TEXT DEFAULT 'fact',
+    authority TEXT DEFAULT 'confirmed',
+    retrieval_role TEXT DEFAULT 'background',
+    confidence REAL DEFAULT 1.0,
+    status TEXT DEFAULT 'active',
+    superseded_by TEXT,
+    valid_from TEXT,
+    valid_until TEXT,
+    source_agent TEXT,
+    source_run_id TEXT,
     file_path TEXT
 );
 
@@ -30,6 +40,37 @@ CREATE TABLE IF NOT EXISTS labels (
     FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS memory_candidates (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    summary TEXT,
+    proposed_tags TEXT,
+    proposed_kind TEXT,
+    proposed_authority TEXT,
+    proposed_retrieval_role TEXT,
+    confidence REAL DEFAULT 0.7,
+    source TEXT NOT NULL,
+    source_agent TEXT,
+    source_run_id TEXT,
+    private INTEGER DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    review_note TEXT,
+    created_at TEXT NOT NULL,
+    reviewed_at TEXT,
+    reviewed_by TEXT,
+    promoted_memory_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agents (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    trust_level TEXT NOT NULL DEFAULT 'candidate_only',
+    can_read_private INTEGER DEFAULT 0,
+    can_write_durable INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     id UNINDEXED, summary, content, tokenize='unicode61'
 );
@@ -39,13 +80,48 @@ CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_private ON memories(private);
 CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(archived);
+CREATE INDEX IF NOT EXISTS idx_candidates_status ON memory_candidates(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_candidates_agent ON memory_candidates(source_agent, status);
+CREATE INDEX IF NOT EXISTS idx_agents_trust ON agents(trust_level, can_write_durable);
 """
+
+MIGRATIONS = [
+    ("kind", "ALTER TABLE memories ADD COLUMN kind TEXT DEFAULT 'fact'"),
+    ("authority", "ALTER TABLE memories ADD COLUMN authority TEXT DEFAULT 'confirmed'"),
+    ("retrieval_role", "ALTER TABLE memories ADD COLUMN retrieval_role TEXT DEFAULT 'background'"),
+    ("confidence", "ALTER TABLE memories ADD COLUMN confidence REAL DEFAULT 1.0"),
+    ("status", "ALTER TABLE memories ADD COLUMN status TEXT DEFAULT 'active'"),
+    ("superseded_by", "ALTER TABLE memories ADD COLUMN superseded_by TEXT"),
+    ("valid_from", "ALTER TABLE memories ADD COLUMN valid_from TEXT"),
+    ("valid_until", "ALTER TABLE memories ADD COLUMN valid_until TEXT"),
+    ("source_agent", "ALTER TABLE memories ADD COLUMN source_agent TEXT"),
+    ("source_run_id", "ALTER TABLE memories ADD COLUMN source_run_id TEXT"),
+]
 
 
 def init_db():
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_conn() as conn:
         conn.executescript(SCHEMA)
+        _migrate_memories_table(conn)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind)")
+        conn.execute(
+            "UPDATE memories SET status = 'archived' WHERE archived = 1 AND (status IS NULL OR status = 'active')"
+        )
+        conn.execute(
+            "UPDATE memories SET status = 'active' WHERE archived = 0 AND status IS NULL"
+        )
+
+
+def _migrate_memories_table(conn):
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(memories)").fetchall()
+    }
+    for column, sql in MIGRATIONS:
+        if column not in columns:
+            conn.execute(sql)
 
 
 @contextmanager

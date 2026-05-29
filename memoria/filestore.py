@@ -21,6 +21,16 @@ def write_file(
     private: bool = False,
     created_at: Optional[str] = None,
     archived: bool = False,
+    kind: str = "fact",
+    authority: str = "confirmed",
+    retrieval_role: str = "background",
+    confidence: float = 1.0,
+    status: str = "active",
+    superseded_by: Optional[str] = None,
+    valid_from: Optional[str] = None,
+    valid_until: Optional[str] = None,
+    source_agent: Optional[str] = None,
+    source_run_id: Optional[str] = None,
 ) -> str:
     """写入 store/*.md，返回相对路径"""
     now = created_at or datetime.now(timezone.utc).isoformat()
@@ -34,17 +44,26 @@ def write_file(
     month_dir.mkdir(parents=True, exist_ok=True)
     filepath = month_dir / f"{memory_id}.md"
 
-    front_matter = (
-        f"---\n"
-        f"id: {memory_id}\n"
-        f"created: {now}\n"
-        f"source: {source}\n"
-        f"tags: {json.dumps(tags, ensure_ascii=False)}\n"
-        f"links: {json.dumps(links, ensure_ascii=False)}\n"
-        f"private: {str(private).lower()}\n"
-        f"archived: {str(archived).lower()}\n"
-        f"---\n\n"
-    )
+    meta = {
+        "id": memory_id,
+        "created": now,
+        "source": source,
+        "tags": tags,
+        "links": links,
+        "private": private,
+        "archived": archived,
+        "kind": kind,
+        "authority": authority,
+        "retrieval_role": retrieval_role,
+        "confidence": confidence,
+        "status": status,
+        "superseded_by": superseded_by,
+        "valid_from": valid_from,
+        "valid_until": valid_until,
+        "source_agent": source_agent,
+        "source_run_id": source_run_id,
+    }
+    front_matter = _render_front_matter(meta)
 
     filepath.write_text(front_matter + content, encoding="utf-8")
 
@@ -84,6 +103,11 @@ def parse_memory_file(text: str) -> Optional[dict]:
                     meta[key] = []
             elif value in ("true", "false"):
                 meta[key] = value == "true"
+            elif key == "confidence":
+                try:
+                    meta[key] = float(value)
+                except ValueError:
+                    meta[key] = value
             else:
                 meta[key] = value
 
@@ -103,14 +127,25 @@ def update_file_metadata(rel_path: str, **updates) -> bool:
 
     content = parsed.pop("content", "")
     parsed.update(updates)
-    ordered_keys = ["id", "created", "source", "tags", "links", "private", "archived"]
-    keys = ordered_keys + sorted(k for k in parsed if k not in ordered_keys)
+    front_matter = _render_front_matter(parsed)
+    filepath.write_text(front_matter + content, encoding="utf-8")
+    return True
 
+
+def _render_front_matter(meta: dict) -> str:
+    ordered_keys = [
+        "id", "created", "source", "tags", "links", "private", "archived",
+        "kind", "authority", "retrieval_role", "confidence", "status",
+        "superseded_by", "valid_from", "valid_until", "source_agent", "source_run_id",
+    ]
+    keys = ordered_keys + sorted(k for k in meta if k not in ordered_keys)
     lines = ["---"]
     for key in keys:
-        if key not in parsed:
+        if key not in meta:
             continue
-        value = parsed[key]
+        value = meta[key]
+        if value is None:
+            continue
         if isinstance(value, list):
             rendered = json.dumps(value, ensure_ascii=False)
         elif isinstance(value, bool):
@@ -118,9 +153,8 @@ def update_file_metadata(rel_path: str, **updates) -> bool:
         else:
             rendered = str(value)
         lines.append(f"{key}: {rendered}")
-    lines.extend(["---", "", content])
-    filepath.write_text("\n".join(lines), encoding="utf-8")
-    return True
+    lines.extend(["---", ""])
+    return "\n".join(lines) + "\n"
 
 
 def extract_links(content: str) -> list[str]:

@@ -39,6 +39,15 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py store \
   --content "要记录的内容" \
   --tags "tag1,tag2"
 
+# 带共享 agent 记忆元数据写入
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py store \
+  --content "用户决定先做 Phase 1 元数据基础。" \
+  --tags "memoria,decision" \
+  --kind decision \
+  --authority user_decision \
+  --retrieval-role hard_constraint \
+  --source-agent codex
+
 # 私密写入
 conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py store \
   --content "私密内容" \
@@ -89,6 +98,55 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py recall \
 # 包含已归档
 conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py recall \
   --query "关键词" --include-archived
+
+# 按生命周期状态召回
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py recall \
+  --limit 20 --include-statuses "active,pinned"
+
+# Agent 输出先写入候选区
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py candidate add \
+  --content "模型生成的候选记忆" \
+  --tags "memoria,agent" \
+  --source-agent hermes \
+  --kind idea \
+  --authority model_generated
+
+# 查看待审核候选
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py candidate list
+
+# 审核通过并提升为 durable memory
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py candidate accept <candidate_id> \
+  --reviewed-by codex \
+  --review-note "内容可保留"
+
+# 拒绝或丢弃候选
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py candidate reject <candidate_id> \
+  --reviewed-by codex \
+  --discard
+
+# 注册 agent 及其 trust policy
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py agent add hermes \
+  --name "Hermes" \
+  --trust-level candidate_only
+
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py agent add codex \
+  --name "Codex" \
+  --trust-level trusted_writer \
+  --can-write-durable
+
+# 通过 agent-aware 入口写入，系统会按 trust policy 自动路由
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py agent-store \
+  --agent-id hermes \
+  --content "模型生成内容"
+
+# 通过 agent-aware 入口召回；只有显式请求且 agent 有权限时才会读私密区
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py agent-recall \
+  --agent-id codex \
+  --query "最近的项目决策"
+
+# 旧数据元数据回填：建议先 dry-run，再按公开区小批量应用
+conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain classify-metadata \
+  --dry-run --public-only --limit 50
 ```
 
 ---
@@ -214,7 +272,12 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/server/app.py --port 8000
 # 访问 http://localhost:8000
 ```
 
-功能：概览 / 语义搜索 / 记忆图谱（力导向可视化）/ 标签云 / 全部记忆列表
+功能：
+- 概览 / 语义搜索 / 记忆图谱 / 标签云 / 全部记忆
+- 结构化上下文：调用 `recall_context()`，按硬约束 / 当前状态 / 既有决策 / 参考资料展示 context pack
+- 候选区：查看待审核候选，支持接收 / 驳回 / 丢弃，支持手工补录候选
+- 代理：查看与注册 agents，管理信任级别、受限读取、正式写入能力
+- 受限内容：单独确认后加载受限记忆
 
 ---
 

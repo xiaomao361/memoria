@@ -1,6 +1,7 @@
 """维护任务 - 重建索引 / 沉睡降权 / 合并候选 / 重要度重算"""
 
 import math
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -51,6 +52,11 @@ def rebuild() -> dict:
                 source = meta.get("source", "migrated")
                 created = meta.get("created", meta.get("created_at", ""))
                 archived = _as_bool(meta.get("archived", False))
+                kind = meta.get("kind", "fact")
+                authority = meta.get("authority", "confirmed")
+                retrieval_role = meta.get("retrieval_role", "background")
+                confidence = float(meta.get("confidence", 1.0) or 1.0)
+                status = meta.get("status") or ("archived" if archived else "active")
 
                 # 计算相对路径
                 if private:
@@ -64,9 +70,17 @@ def rebuild() -> dict:
                     conn.execute(
                         """INSERT OR REPLACE INTO memories
                            (id, summary, content, source, created_at, importance,
-                            private, archived, file_path)
-                           VALUES (?, ?, ?, ?, ?, 0.0, ?, ?, ?)""",
-                        (mid, summary, content, source, created, int(private), int(archived), file_path),
+                            private, archived, kind, authority, retrieval_role,
+                            confidence, status, superseded_by, valid_from, valid_until,
+                            source_agent, source_run_id, file_path)
+                           VALUES (?, ?, ?, ?, ?, 0.0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            mid, summary, content, source, created, int(private),
+                            int(archived), kind, authority, retrieval_role, confidence,
+                            status, meta.get("superseded_by"), meta.get("valid_from"),
+                            meta.get("valid_until"), meta.get("source_agent"),
+                            meta.get("source_run_id"), file_path,
+                        ),
                     )
                     for tag in tags:
                         conn.execute(
@@ -84,7 +98,7 @@ def rebuild() -> dict:
                     )
 
                 # 向量
-                if not archived:
+                if not archived and status in ("active", "pinned"):
                     embed_text = f"{summary}\n{content}"
                     upsert_vector(mid, embed_text, private=private)
                 imported += 1
@@ -104,7 +118,9 @@ def suggest_merge(limit: int = 10, private: bool = False, threshold: float = 0.8
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT id, summary, content FROM memories
-               WHERE archived = 0 AND private = ?
+               WHERE archived = 0
+                 AND COALESCE(status, 'active') IN ('active', 'pinned')
+                 AND private = ?
                ORDER BY created_at DESC LIMIT 100""",
             (int(private),),
         ).fetchall()
@@ -156,6 +172,7 @@ def dormant_sweep(dry_run: bool = True) -> dict:
         rows = conn.execute(
             """SELECT id, summary, last_recalled_at, created_at, private, file_path FROM memories
                WHERE archived = 0
+               AND COALESCE(status, 'active') != 'pinned'
                AND (
                    (last_recalled_at IS NOT NULL AND last_recalled_at < ?)
                    OR (last_recalled_at IS NULL AND created_at < ?)
@@ -168,7 +185,7 @@ def dormant_sweep(dry_run: bool = True) -> dict:
             demoted.append({"id": row["id"], "summary": row["summary"][:60]})
             if not dry_run:
                 conn.execute(
-                    "UPDATE memories SET archived = 1, updated_at = ? WHERE id = ?",
+                    "UPDATE memories SET archived = 1, status = 'archived', updated_at = ? WHERE id = ?",
                     (datetime.now(timezone.utc).isoformat(), row["id"]),
                 )
                 if row["file_path"]:
@@ -193,7 +210,8 @@ def recompute_importance(dry_run: bool = False, half_life_days: int = 30) -> dic
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT id, recall_count, last_recalled_at, created_at, importance
-               FROM memories WHERE archived = 0"""
+               FROM memories
+               WHERE archived = 0 AND COALESCE(status, 'active') IN ('active', 'pinned')"""
         ).fetchall()
 
         for row in rows:
@@ -259,7 +277,9 @@ def suggest_conflicts(
     with get_conn() as conn:
         rows = conn.execute(
             """SELECT id, summary, created_at FROM memories
-               WHERE archived = 0 AND private = ?
+               WHERE archived = 0
+                 AND COALESCE(status, 'active') IN ('active', 'pinned')
+                 AND private = ?
                ORDER BY created_at DESC LIMIT 200""",
             (int(private),),
         ).fetchall()
@@ -279,7 +299,9 @@ def suggest_conflicts(
                 other = meta_map.get(s["id"])
                 if not other:
                     other_row = conn.execute(
-                        "SELECT id, summary, created_at FROM memories WHERE id = ? AND archived = 0",
+                        """SELECT id, summary, created_at FROM memories
+                           WHERE id = ? AND archived = 0
+                           AND COALESCE(status, 'active') IN ('active', 'pinned')""",
                         (s["id"],),
                     ).fetchone()
                     if not other_row:
@@ -352,3 +374,169 @@ def nightly(dry_run: bool = False) -> dict:
         },
     }
     return report
+
+
+def classify_metadata(
+    dry_run: bool = True,
+    force: bool = False,
+    limit: int = 0,
+    private: Optional[bool] = None,
+) -> dict:
+    """
+    对默认元数据进行规则分类，补全 kind / authority / retrieval_role。
+
+    默认只处理仍处于默认值的记录；force=True 时重判所有记录。
+    """
+    init_db()
+    sql = """SELECT id, summary, content, source, source_agent, private,
+                    kind, authority, retrieval_role, file_path
+             FROM memories
+             WHERE 1 = 1"""
+    params: list = []
+    if private is not None:
+        sql += " AND private = ?"
+        params.append(int(private))
+    sql += " ORDER BY created_at DESC"
+    if limit > 0:
+        sql += " LIMIT ?"
+        params.append(limit)
+
+    updates = []
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+        for row in rows:
+            if not force and not _needs_metadata_backfill(row):
+                continue
+            suggestion = _classify_memory_metadata(row)
+            if not suggestion:
+                continue
+            changed = {
+                key: value
+                for key, value in suggestion.items()
+                if key in ("kind", "authority", "retrieval_role") and row[key] != value
+            }
+            if not changed:
+                continue
+
+            updates.append({
+                "id": row["id"],
+                "summary": row["summary"][:120],
+                "old": {
+                    "kind": row["kind"],
+                    "authority": row["authority"],
+                    "retrieval_role": row["retrieval_role"],
+                },
+                "new": {
+                    "kind": suggestion["kind"],
+                    "authority": suggestion["authority"],
+                    "retrieval_role": suggestion["retrieval_role"],
+                },
+                "reason": suggestion["reason"],
+            })
+
+            if not dry_run:
+                now = datetime.now(timezone.utc).isoformat()
+                conn.execute(
+                    """UPDATE memories SET
+                       kind = ?, authority = ?, retrieval_role = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        suggestion["kind"],
+                        suggestion["authority"],
+                        suggestion["retrieval_role"],
+                        now,
+                        row["id"],
+                    ),
+                )
+                if row["file_path"]:
+                    update_file_metadata(
+                        row["file_path"],
+                        kind=suggestion["kind"],
+                        authority=suggestion["authority"],
+                        retrieval_role=suggestion["retrieval_role"],
+                    )
+
+    return {
+        "dry_run": dry_run,
+        "force": force,
+        "scanned": len(rows) if 'rows' in locals() else 0,
+        "updated": len(updates),
+        "samples": updates[:20],
+    }
+
+
+def _needs_metadata_backfill(row) -> bool:
+    return (
+        (row["kind"] or "fact") == "fact"
+        and (row["authority"] or "confirmed") == "confirmed"
+        and (row["retrieval_role"] or "background") == "background"
+    )
+
+
+def _classify_memory_metadata(row) -> Optional[dict]:
+    text = f"{row['summary'] or ''}\n{row['content'] or ''}".lower()
+    source = (row["source"] or "").lower()
+    source_agent = (row["source_agent"] or "").lower()
+    technical_entity_terms = [
+        "sql", "sqlite", "python", "api", "endpoint", "schema", "migration",
+        "vector", "embedding", "fastapi", "streamlit", "chromadb", "http",
+        "script", ".py", "workspace", "artifacts/",
+        "frontend", "backend", "server", "cli", "db", "table",
+    ]
+    technical_action_terms = ["发布", "修复", "脚本", "工具", "界面", "重构", "同步", "bug"]
+
+    if source_agent or source.startswith("agent") or source == "agent_candidate":
+        return _metadata_suggestion("agent_observation", "model_generated", "background", "agent source")
+
+    if _has_any(text, [
+        "用户决定", "定了", "先按", "就这么定", "hard constraint", "决议",
+        "确定从", "明确采用", "不做", "不要做", "禁止",
+    ]) and not _has_any(text, [
+        "讨论", "考虑", "想法", "方案未定", "候选", "建议", "也许", "可能",
+    ]):
+        return _metadata_suggestion("decision", "user_decision", "hard_constraint", "decision keywords")
+
+    if _has_any(text, [
+        "当前项目状态", "当前状态", "项目状态", "进展", "状态：", "status:",
+        "next step", "下一步", "继续做", "进行到", "已完成", "已实现",
+        "phase ", "phase-", "已接上", "已补上", "已跑通",
+    ]) and not _has_any(text, [
+        "想法", "方案未定", "考虑", "候选", "也许", "可能", "讨论",
+    ]):
+        return _metadata_suggestion("project_state", "confirmed", "current_state", "project-state keywords")
+
+    if _has_any(text, technical_entity_terms) or (
+        _has_any(text, technical_action_terms)
+        and _has_any(text, technical_entity_terms)
+    ):
+        return _metadata_suggestion("technical_note", "confirmed", "reference", "technical keywords")
+
+    if _has_any(text, [
+        "todo", "待办", "待处理", "follow up", "action item", "todo:",
+        "下一步开发", "下一步处理", "迁移待办",
+    ]):
+        return _metadata_suggestion("todo", "confirmed", "current_state", "todo keywords")
+
+    if _has_any(text, [
+        "会议", "meeting", "昨天", "今天", "刚刚", "发生了", "聊了",
+        "看了", "reviewed", "saw", "observed",
+    ]):
+        return _metadata_suggestion("event", "observed", "background", "event keywords")
+
+    if re.search(r"\b(todo|fixme|note)\b", text):
+        return _metadata_suggestion("technical_note", "confirmed", "reference", "generic note keywords")
+
+    return None
+
+
+def _metadata_suggestion(kind: str, authority: str, retrieval_role: str, reason: str) -> dict:
+    return {
+        "kind": kind,
+        "authority": authority,
+        "retrieval_role": retrieval_role,
+        "reason": reason,
+    }
+
+
+def _has_any(text: str, needles: list[str]) -> bool:
+    return any(needle in text for needle in needles)
