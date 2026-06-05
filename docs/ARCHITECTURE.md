@@ -17,7 +17,7 @@
 ## 2. 存储架构
 
 ```
-~/.qclaw/memoria/
+/Users/zhouwei/.claracore/memoria/
 ├── store/                    # 唯一真实来源
 │   ├── {YYYY-MM}/           # 按月归档
 │   │   └── {uuid}.md        # 每条记忆一个文件
@@ -105,9 +105,9 @@ CREATE TABLE agents (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
-    trust_level TEXT NOT NULL DEFAULT 'candidate_only',
+    trust_level TEXT NOT NULL DEFAULT 'trusted_writer',
     can_read_private INTEGER DEFAULT 0,
-    can_write_durable INTEGER DEFAULT 0,
+    can_write_durable INTEGER DEFAULT 1,
     created_at TEXT NOT NULL
 );
 
@@ -162,7 +162,7 @@ core.promote_candidate(candidate_id, ...)
     └─ 4. 回写 memory_candidates.reviewed_* / promoted_memory_id
 ```
 
-- agent 输出默认可以先进入 candidate staging
+- 不确定、外部或待审核输出可以先进入 candidate staging
 - candidate 不参与正常 recall
 - durable memory 仍只通过 `store()` 落地，避免双写路径分叉
 
@@ -181,6 +181,7 @@ core.store_from_agent(agent_id, ...)
 - `candidate_only` 默认进入候选区
 - `read_only` 禁止写入
 - `private_allowed` 当前仅放开私密访问能力，写入仍先进 candidate
+- 本机设备上的 agent 默认按 `trusted_writer` 注册；候选区用于需要复核的内容
 
 ## 4. Agent-Aware Recall
 
@@ -246,7 +247,14 @@ cli.py maintain suggest-merge
 # Agent 拿到候选后，用自身 LLM 能力生成合并内容，写回：
 cli.py store --content "合并后内容" --merge-from "id1,id2,id3"
 # 原始记忆自动标记 archived=1
+
+# 只读质量审计，给下一步 cleanup/review 提供结构化信号：
+cli.py maintain audit-quality --public-only --limit 20
 ```
+
+`audit-quality` 不修改内容或索引；它汇总 summary 健康度、source_agent
+来源、默认元数据、候选队列、最近 trusted-writer 写入，以及可选的
+merge/conflict 候选。
 
 ---
 
@@ -276,7 +284,7 @@ cli.py store --content "合并后内容" --merge-from "id1,id2,id3"
 FastAPI 服务，端口默认 8000：
 
 ```bash
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/server/app.py --port 8000
+conda run -n zhouwei python3 server/app.py --port 8000
 ```
 
 ### REST API
@@ -314,9 +322,9 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/server/app.py --port 8000
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| STORE_DIR | ~/.qclaw/memoria/store | 文件存储目录 |
-| DB_PATH | ~/.qclaw/memoria/memoria.db | SQLite 路径 |
-| VECTORS_DIR | ~/.qclaw/memoria/vectors | 向量索引目录 |
+| STORE_DIR | /Users/zhouwei/.claracore/memoria/store | 文件存储目录 |
+| DB_PATH | /Users/zhouwei/.claracore/memoria/memoria.db | SQLite 路径 |
+| VECTORS_DIR | /Users/zhouwei/.claracore/memoria/vectors | 向量索引目录 |
 | OLLAMA_URL | http://localhost:11434 | Ollama 地址 |
 | EMBEDDING_MODEL | bge-m3 | Embedding 模型 |
 | EMBEDDING_DIM | 1024 | 向量维度 |
@@ -328,7 +336,7 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/server/app.py --port 8000
 ## 9. 目录结构
 
 ```
-~/.qclaw/skills/memoria/
+./
 ├── SKILL.md                  # Agent 使用指南
 ├── README.md                 # 项目说明
 ├── docs/ARCHITECTURE.md      # 本文档

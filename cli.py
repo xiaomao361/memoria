@@ -86,7 +86,12 @@ def cmd_stats(args):
 
 
 def cmd_labels(args):
-    results = get_labels(limit=args.limit, include_private=args.include_private)
+    if args.audit:
+        from memoria.maintain import audit_labels
+
+        results = audit_labels(limit=args.limit, include_private=args.include_private)
+    else:
+        results = get_labels(limit=args.limit, include_private=args.include_private)
     print(json.dumps(results, ensure_ascii=False, indent=2))
 
 
@@ -123,7 +128,8 @@ def cmd_get(args):
 def cmd_maintain(args):
     from memoria.maintain import (
         rebuild, suggest_merge, dormant_sweep, recompute_importance,
-        suggest_conflicts, nightly, classify_metadata,
+        suggest_conflicts, nightly, classify_metadata, canonicalize_labels,
+        repair_summaries, audit_quality, backfill_source_agent,
     )
 
     if args.action == "rebuild":
@@ -149,6 +155,34 @@ def cmd_maintain(args):
             force=args.force,
             limit=args.limit,
             private=private,
+        )
+    elif args.action == "canonicalize-labels":
+        result = canonicalize_labels(
+            dry_run=args.dry_run,
+            include_private=not args.public_only,
+        )
+    elif args.action == "repair-summaries":
+        private = None
+        if args.private_only:
+            private = True
+        elif args.public_only:
+            private = False
+        result = repair_summaries(
+            dry_run=args.dry_run,
+            limit=args.limit,
+            private=private,
+        )
+    elif args.action == "audit-quality":
+        result = audit_quality(
+            limit=args.limit,
+            include_private=args.include_private or args.private_only,
+            include_review_candidates=not args.skip_review_candidates,
+        )
+    elif args.action == "backfill-source-agent":
+        result = backfill_source_agent(
+            dry_run=args.dry_run,
+            limit=args.limit,
+            include_private=args.include_private or args.private_only,
         )
     else:
         print(f"Unknown action: {args.action}")
@@ -392,6 +426,7 @@ def main():
     p_labels = sub.add_parser("labels", help="查看所有标签")
     p_labels.add_argument("--limit", type=int, default=0)
     p_labels.add_argument("--include-private", action="store_true", help="包含私密标签")
+    p_labels.add_argument("--audit", action="store_true", help="输出标签别名/同义标签审计建议")
     p_labels.set_defaults(func=cmd_labels)
 
     # get
@@ -422,6 +457,7 @@ def main():
     p_maint.add_argument("action", choices=[
         "rebuild", "suggest-merge", "dormant",
         "recompute-importance", "suggest-conflicts", "nightly", "classify-metadata",
+        "canonicalize-labels", "repair-summaries", "audit-quality", "backfill-source-agent",
     ])
     p_maint.add_argument("--limit", type=int, default=10)
     p_maint.add_argument("--dry-run", action="store_true")
@@ -429,6 +465,8 @@ def main():
     p_maint.add_argument("--force", action="store_true", help="重判所有记忆，不只默认元数据")
     p_maint.add_argument("--private-only", action="store_true", help="仅处理私密记忆")
     p_maint.add_argument("--public-only", action="store_true", help="仅处理公开记忆")
+    p_maint.add_argument("--include-private", action="store_true", help="质量审计时包含私密记忆")
+    p_maint.add_argument("--skip-review-candidates", action="store_true", help="跳过 merge/conflict 候选扫描，加快质量审计")
     p_maint.set_defaults(func=cmd_maintain)
 
     # candidate
@@ -461,9 +499,9 @@ def main():
     p_agent.add_argument("id", nargs="?", help="agent ID")
     p_agent.add_argument("--name", default=None, help="agent 名称")
     p_agent.add_argument("--description", default=None, help="agent 描述")
-    p_agent.add_argument("--trust-level", default="candidate_only", help="candidate_only / trusted_writer / read_only / private_allowed")
+    p_agent.add_argument("--trust-level", default="trusted_writer", help="candidate_only / trusted_writer / read_only / private_allowed")
     p_agent.add_argument("--can-read-private", action="store_true", help="允许访问私密记忆")
-    p_agent.add_argument("--can-write-durable", action="store_true", help="允许直接写 durable memory")
+    p_agent.add_argument("--can-write-durable", action="store_true", default=None, help="允许直接写 durable memory；默认随 trust-level 决定")
     p_agent.add_argument("--limit", type=int, default=100, help="list 条数")
     p_agent.add_argument("--offset", type=int, default=0, help="list 偏移")
     p_agent.set_defaults(func=cmd_agent)
@@ -477,9 +515,9 @@ def main():
     p_agent_store.add_argument("--private", action="store_true", help="私密写入")
     p_agent_store.add_argument("--merge-from", default=None, help="合并来源 ID，逗号分隔")
     p_agent_store.add_argument("--kind", default="fact", help="记忆类型")
-    p_agent_store.add_argument("--authority", default="model_generated", help="权威性")
+    p_agent_store.add_argument("--authority", default=None, help="权威性；trusted_writer durable 默认 confirmed，候选流默认 model_generated")
     p_agent_store.add_argument("--retrieval-role", default="background", help="召回角色")
-    p_agent_store.add_argument("--confidence", type=float, default=0.7, help="置信度 0-1")
+    p_agent_store.add_argument("--confidence", type=float, default=None, help="置信度 0-1；trusted_writer durable 默认 1.0，候选流默认 0.7")
     p_agent_store.add_argument("--status", default="active", help="durable memory 的生命周期状态")
     p_agent_store.add_argument("--source-run-id", default=None, help="来源运行 ID")
     p_agent_store.set_defaults(func=cmd_agent_store)

@@ -65,9 +65,9 @@ CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT,
-    trust_level TEXT NOT NULL DEFAULT 'candidate_only',
+    trust_level TEXT NOT NULL DEFAULT 'trusted_writer',
     can_read_private INTEGER DEFAULT 0,
-    can_write_durable INTEGER DEFAULT 0,
+    can_write_durable INTEGER DEFAULT 1,
     created_at TEXT NOT NULL
 );
 

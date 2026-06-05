@@ -88,7 +88,7 @@ class AgentRequest(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
-    trust_level: str = "candidate_only"
+    trust_level: str = "trusted_writer"
     can_read_private: bool = False
     can_write_durable: Optional[bool] = None
 
@@ -101,9 +101,9 @@ class AgentStoreRequest(BaseModel):
     private: bool = False
     merge_from: Optional[list[str]] = None
     kind: str = "fact"
-    authority: str = "model_generated"
+    authority: Optional[str] = None
     retrieval_role: str = "background"
-    confidence: float = 0.7
+    confidence: Optional[float] = None
     status: str = "active"
     source_run_id: Optional[str] = None
 

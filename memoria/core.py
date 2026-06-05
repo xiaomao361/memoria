@@ -1,11 +1,12 @@
 """核心业务逻辑 - store / recall / manage 统一入口"""
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from .config import STORE_DIR
+from .config import STORE_DIR, load_label_aliases
 from .db import get_conn, init_db
 from .vector import upsert_vector, search_vectors, delete_vector
 from .filestore import write_file, extract_links, update_file_metadata
@@ -19,8 +20,11 @@ def _extract_summary(content: str) -> str:
     """从内容提取摘要：优先 ## 摘要 段落，否则取首行"""
     lines = content.strip().split("\n")
     for i, line in enumerate(lines):
-        if line.strip() == "## 摘要" and i + 1 < len(lines):
-            return lines[i + 1].strip()[:200]
+        if line.strip() == "## 摘要":
+            for candidate in lines[i + 1:]:
+                stripped = candidate.strip()
+                if stripped:
+                    return stripped[:200]
     for line in lines:
         stripped = line.strip()
         if stripped and not stripped.startswith("#"):
@@ -28,12 +32,20 @@ def _extract_summary(content: str) -> str:
     return content[:200]
 
 
-def _normalize_labels(labels: Optional[list[str]]) -> list[str]:
-    """规范化标签/链接并保持输入顺序去重"""
+def _normalize_labels(labels: Optional[list[str]], apply_aliases: bool = True) -> list[str]:
+    """规范化标签并保持输入顺序去重。"""
+    alias_map = {}
+    if apply_aliases:
+        for canonical, variants in load_label_aliases().items():
+            for variant in variants:
+                alias_map[variant] = canonical
+
     seen = set()
     out = []
     for label in labels or []:
         name = label.lower().strip()
+        if apply_aliases:
+            name = alias_map.get(name, name)
         if not name or name in seen:
             continue
         seen.add(name)
@@ -56,7 +68,7 @@ def _json_loads(value, default):
 
 def _normalize_agent_trust_level(trust_level: str) -> str:
     allowed = {"candidate_only", "trusted_writer", "read_only", "private_allowed"}
-    normalized = (trust_level or "candidate_only").strip().lower()
+    normalized = (trust_level or "trusted_writer").strip().lower()
     if normalized not in allowed:
         raise ValueError(f"invalid trust_level: {trust_level}")
     return normalized
@@ -128,9 +140,12 @@ def store(
     """
     init_db()
 
+    if source == "manual" and source_agent:
+        source = source_agent
+
     mid = memory_id or str(uuid.uuid4())
     tags = _normalize_labels(tags)
-    links = _normalize_labels(extract_links(content))
+    links = _normalize_labels(extract_links(content), apply_aliases=True)
     summary = _extract_summary(content)
     now = _now()
     status = "archived" if archived else (status or "active")
@@ -322,6 +337,7 @@ def _recall_by_tags(
     tags: list[str], limit: int, private: bool,
     include_archived: bool, include_content: bool, include_statuses: Optional[list[str]],
 ) -> list[dict]:
+    tags = _normalize_labels(tags)
     with get_conn() as conn:
         placeholders = ",".join("?" for _ in tags)
         sql = f"""
@@ -561,6 +577,8 @@ def purge_memory(memory_id: str) -> bool:
 def update_tags(memory_id: str, add: list[str] = None, remove: list[str] = None) -> bool:
     """更新标签"""
     init_db()
+    add = _normalize_labels(add)
+    remove = _normalize_labels(remove)
     with get_conn() as conn:
         exists = conn.execute(
             "SELECT 1 FROM memories WHERE id = ?", (memory_id,)
@@ -571,16 +589,13 @@ def update_tags(memory_id: str, add: list[str] = None, remove: list[str] = None)
             for tag in remove:
                 conn.execute(
                     "DELETE FROM labels WHERE memory_id = ? AND name = ?",
-                    (memory_id, tag.lower().strip()),
+                    (memory_id, tag),
                 )
         if add:
             for tag in add:
-                name = tag.lower().strip()
-                if not name:
-                    continue
                 conn.execute(
                     "INSERT OR IGNORE INTO labels (memory_id, name, type) VALUES (?, ?, 'tag')",
-                    (memory_id, name),
+                    (memory_id, tag),
                 )
         conn.execute(
             "UPDATE memories SET updated_at = ? WHERE id = ?", (_now(), memory_id)
@@ -979,7 +994,7 @@ def register_agent(
     agent_id: str,
     name: str,
     description: Optional[str] = None,
-    trust_level: str = "candidate_only",
+    trust_level: str = "trusted_writer",
     can_read_private: bool = False,
     can_write_durable: Optional[bool] = None,
 ) -> dict:
@@ -1195,9 +1210,9 @@ def store_from_agent(
     private: bool = False,
     merge_from: Optional[list[str]] = None,
     kind: str = "fact",
-    authority: str = "model_generated",
+    authority: Optional[str] = None,
     retrieval_role: str = "background",
-    confidence: float = 0.7,
+    confidence: Optional[float] = None,
     status: str = "active",
     source_run_id: Optional[str] = None,
 ) -> dict:
@@ -1213,18 +1228,19 @@ def store_from_agent(
     if private and not agent["can_read_private"]:
         raise ValueError("agent is not allowed to write private memory")
 
+    normalized_source = agent_id if (source or "").lower() in ("", "agent", "manual") else source
     write_durable = trust_level == "trusted_writer" and agent["can_write_durable"]
     if write_durable:
         result = store(
             content=content,
             tags=tags,
-            source=source,
+            source=normalized_source,
             private=private,
             merge_from=merge_from,
             kind=kind,
-            authority=authority,
+            authority=authority or "confirmed",
             retrieval_role=retrieval_role,
-            confidence=confidence,
+            confidence=1.0 if confidence is None else confidence,
             status=status,
             source_agent=agent_id,
             source_run_id=source_run_id,
@@ -1240,14 +1256,14 @@ def store_from_agent(
     candidate = create_candidate(
         content=content,
         tags=tags,
-        source=source,
+        source=source if (source or "").lower() not in ("", "agent", "manual") else "agent_candidate",
         source_agent=agent_id,
         source_run_id=source_run_id,
         private=private,
         proposed_kind=kind,
-        proposed_authority=authority,
+        proposed_authority=authority or "model_generated",
         proposed_retrieval_role=retrieval_role,
-        confidence=confidence,
+        confidence=0.7 if confidence is None else confidence,
     )
     return {
         "route": "candidate",
@@ -1307,16 +1323,20 @@ def _enrich_context_item(item: dict, query: str, project: Optional[str] = None) 
     role_boost = role_map.get(retrieval_role, 0.0)
     status_penalty = status_penalty_map.get(status, 0.0)
     confidence_term = (float(item.get("confidence") or 1.0) - 0.5) * 0.08
+    haystack = " ".join([
+        item.get("summary") or "",
+        item.get("content") or "" if "content" in item else "",
+    ])
+    lexical_boost = _lexical_query_boost(query=query, haystack=haystack)
     project_boost = 0.0
     if project:
-        haystacks = [
-            (item.get("summary") or "").lower(),
-            (item.get("content") or "").lower() if "content" in item else "",
-        ]
-        if project.lower() in " ".join(haystacks):
-            project_boost = 0.08
+        if _normalized_contains(haystack, project):
+            project_boost = 0.12
 
-    total = semantic + importance_boost + authority_boost + role_boost + confidence_term + project_boost + status_penalty
+    total = (
+        semantic + importance_boost + authority_boost + role_boost
+        + confidence_term + lexical_boost + project_boost + status_penalty
+    )
     total = round(total, 4)
     enriched = dict(item)
     enriched["score"] = total
@@ -1324,6 +1344,7 @@ def _enrich_context_item(item: dict, query: str, project: Optional[str] = None) 
         semantic=semantic,
         authority=authority,
         retrieval_role=retrieval_role,
+        lexical_boost=lexical_boost,
         project_boost=project_boost,
         status=status,
     )
@@ -1333,6 +1354,7 @@ def _enrich_context_item(item: dict, query: str, project: Optional[str] = None) 
         "authority": round(authority_boost, 4),
         "role": round(role_boost, 4),
         "confidence": round(confidence_term, 4),
+        "lexical": round(lexical_boost, 4),
         "project": round(project_boost, 4),
         "status_penalty": round(status_penalty, 4),
     }
@@ -1343,12 +1365,15 @@ def _build_context_reason(
     semantic: float,
     authority: str,
     retrieval_role: str,
+    lexical_boost: float,
     project_boost: float,
     status: str,
 ) -> str:
     parts = []
     if semantic > 0:
         parts.append("semantic match")
+    if lexical_boost > 0:
+        parts.append("lexical match")
     if authority in ("user_decision", "user_preference", "confirmed", "observed"):
         parts.append(authority.replace("_", " "))
     if retrieval_role:
@@ -1360,6 +1385,37 @@ def _build_context_reason(
     if not parts:
         parts.append("metadata match")
     return " + ".join(parts)
+
+
+def _lexical_query_boost(query: str, haystack: str) -> float:
+    terms = _query_terms(query)
+    if not terms:
+        return 0.0
+    normalized_haystack = _normalize_search_text(haystack)
+    matches = sum(1 for term in terms if term in normalized_haystack)
+    if matches == 0:
+        return 0.0
+    return min(0.04 * matches, 0.16)
+
+
+def _query_terms(query: str) -> list[str]:
+    normalized = re.sub(r"[^a-z0-9_\u4e00-\u9fff]+", " ", (query or "").lower())
+    terms = []
+    for term in re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]{2,}", normalized):
+        if len(term) < 3 and not re.match(r"[\u4e00-\u9fff]{2,}", term):
+            continue
+        terms.append(_normalize_search_text(term))
+    return sorted(set(terms))
+
+
+def _normalized_contains(haystack: str, needle: str) -> bool:
+    normalized_haystack = _normalize_search_text(haystack)
+    normalized_needle = _normalize_search_text(needle)
+    return bool(normalized_needle and normalized_needle in normalized_haystack)
+
+
+def _normalize_search_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9_\u4e00-\u9fff]+", "", (value or "").lower())
 
 
 def _context_bucket(item: dict) -> str:

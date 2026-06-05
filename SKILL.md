@@ -1,7 +1,7 @@
 ---
 name: memoria
 description: |
-  AI Agent 通用记忆系统 v6。跨会话记忆持久化与智能召回。
+  AI Agent 通用记忆系统 v6.9。跨会话记忆持久化与智能召回。
   当用户提到"记住"、"这个重要"、"之前说过"、"你还记得吗"，
   或需要持久化跨会话信息时使用。
 metadata:
@@ -19,7 +19,7 @@ metadata:
 
 所有命令使用 conda 环境：
 ```bash
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py <command>
+conda run -n zhouwei python3 cli.py <command>
 ```
 
 ---
@@ -35,12 +35,12 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py <command>
 
 ```bash
 # 基本写入
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py store \
+conda run -n zhouwei python3 cli.py store \
   --content "要记录的内容" \
   --tags "tag1,tag2"
 
 # 带共享 agent 记忆元数据写入
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py store \
+conda run -n zhouwei python3 cli.py store \
   --content "用户决定先做 Phase 1 元数据基础。" \
   --tags "memoria,decision" \
   --kind decision \
@@ -49,13 +49,13 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py store \
   --source-agent codex
 
 # 私密写入
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py store \
+conda run -n zhouwei python3 cli.py store \
   --content "私密内容" \
   --tags "tag1" \
   --private
 
 # 合并写入（将多条旧记忆合并为一条新的）
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py store \
+conda run -n zhouwei python3 cli.py store \
   --content "合并后的内容" \
   --tags "tag1" \
   --merge-from "old_id1,old_id2"
@@ -72,39 +72,39 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py store \
 
 ```bash
 # 语义搜索（最常用）
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py recall \
+conda run -n zhouwei python3 cli.py recall \
   --query "关键词或自然语言描述"
 
 # 标签搜索
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py recall \
+conda run -n zhouwei python3 cli.py recall \
   --tags "kraken,项目"
 
 # 精确查找
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py recall \
+conda run -n zhouwei python3 cli.py recall \
   --id "uuid"
 
 # 最近 N 条
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py recall \
+conda run -n zhouwei python3 cli.py recall \
   --limit 20
 
 # 搜索私密区
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py recall \
+conda run -n zhouwei python3 cli.py recall \
   --query "关键词" --private
 
 # 包含全文
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py recall \
+conda run -n zhouwei python3 cli.py recall \
   --query "关键词" --with-content
 
 # 包含已归档
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py recall \
+conda run -n zhouwei python3 cli.py recall \
   --query "关键词" --include-archived
 
 # 按生命周期状态召回
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py recall \
+conda run -n zhouwei python3 cli.py recall \
   --limit 20 --include-statuses "active,pinned"
 
 # Agent 输出先写入候选区
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py candidate add \
+conda run -n zhouwei python3 cli.py candidate add \
   --content "模型生成的候选记忆" \
   --tags "memoria,agent" \
   --source-agent hermes \
@@ -112,41 +112,52 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py candidate add \
   --authority model_generated
 
 # 查看待审核候选
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py candidate list
+conda run -n zhouwei python3 cli.py candidate list
 
 # 审核通过并提升为 durable memory
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py candidate accept <candidate_id> \
+conda run -n zhouwei python3 cli.py candidate accept <candidate_id> \
   --reviewed-by codex \
   --review-note "内容可保留"
 
 # 拒绝或丢弃候选
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py candidate reject <candidate_id> \
+conda run -n zhouwei python3 cli.py candidate reject <candidate_id> \
   --reviewed-by codex \
   --discard
 
-# 注册 agent 及其 trust policy
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py agent add hermes \
+# 注册本机 agent 及其 trust policy
+conda run -n zhouwei python3 cli.py agent add hermes \
   --name "Hermes" \
-  --trust-level candidate_only
+  --trust-level trusted_writer \
+  --can-write-durable
 
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py agent add codex \
+conda run -n zhouwei python3 cli.py agent add codex \
   --name "Codex" \
   --trust-level trusted_writer \
   --can-write-durable
 
 # 通过 agent-aware 入口写入，系统会按 trust policy 自动路由
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py agent-store \
+# trusted_writer durable 默认 authority=confirmed/confidence=1.0；
+# candidate_only 或不确定内容仍进入候选流，默认 authority=model_generated/confidence=0.7。
+conda run -n zhouwei python3 cli.py agent-store \
   --agent-id hermes \
-  --content "模型生成内容"
+  --content "已确认的 Hermes 运行状态"
 
 # 通过 agent-aware 入口召回；只有显式请求且 agent 有权限时才会读私密区
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py agent-recall \
+conda run -n zhouwei python3 cli.py agent-recall \
   --agent-id codex \
   --query "最近的项目决策"
 
 # 旧数据元数据回填：建议先 dry-run，再按公开区小批量应用
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain classify-metadata \
+conda run -n zhouwei python3 cli.py maintain classify-metadata \
   --dry-run --public-only --limit 50
+
+# 只读质量审计：汇总摘要、来源、元数据、候选队列、疑似合并/冲突等信号
+conda run -n zhouwei python3 cli.py maintain audit-quality \
+  --public-only --limit 20
+
+# 历史来源回填：按 source=clara/codex/lara/hermes 回填 source_agent，并修正旧 manual 默认值
+conda run -n zhouwei python3 cli.py maintain backfill-source-agent \
+  --dry-run --include-private --limit 0
 ```
 
 ---
@@ -155,28 +166,28 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain classify-me
 
 ```bash
 # 系统统计
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py stats
+conda run -n zhouwei python3 cli.py stats
 
 # 查看所有公开活跃标签
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py labels
+conda run -n zhouwei python3 cli.py labels
 
 # 包含私密标签
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py labels --include-private
+conda run -n zhouwei python3 cli.py labels --include-private
 
 # 获取单条详情
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py get <uuid>
+conda run -n zhouwei python3 cli.py get <uuid>
 
 # 删除（软删除，标记为 archived）
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py delete <uuid>
+conda run -n zhouwei python3 cli.py delete <uuid>
 
 # 恢复已归档记忆
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py restore <uuid>
+conda run -n zhouwei python3 cli.py restore <uuid>
 
 # 永久删除（不可恢复）
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py delete --purge <uuid>
+conda run -n zhouwei python3 cli.py delete --purge <uuid>
 
 # 管理标签
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py tag <uuid> --add "new_tag" --remove "old_tag"
+conda run -n zhouwei python3 cli.py tag <uuid> --add "new_tag" --remove "old_tag"
 ```
 
 ---
@@ -197,7 +208,7 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py tag <uuid> --add "ne
 
 ```bash
 # 每天凌晨 3 点
-0 3 * * *  conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain nightly > ~/.qclaw/memoria/logs/nightly-$(date +\%F).json 2>&1
+0 3 * * *  conda run -n zhouwei python3 cli.py maintain nightly > /Users/zhouwei/.claracore/memoria/logs/nightly-$(date +\%F).json 2>&1
 ```
 
 外部 agent（openclaw 等）读取 JSON 中的 `review` 部分，二次裁决后通过 store/delete/tag 命令落地。
@@ -208,25 +219,33 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py tag <uuid> --add "ne
 
 ```bash
 # 从 store/*.md 重建 SQLite + 向量索引（幂等，可反复执行）
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain rebuild
+conda run -n zhouwei python3 cli.py maintain rebuild
 
 # 查找可合并的相似记忆
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain suggest-merge
+conda run -n zhouwei python3 cli.py maintain suggest-merge
 
 # 沉睡降权（>30天未召回的记忆标记为 archived）
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain dormant
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain dormant --dry-run
+conda run -n zhouwei python3 cli.py maintain dormant
+conda run -n zhouwei python3 cli.py maintain dormant --dry-run
 
 # 重要度重算（基于 recall_count + 时效衰减）
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain recompute-importance
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain recompute-importance --half-life 30 --dry-run
+conda run -n zhouwei python3 cli.py maintain recompute-importance
+conda run -n zhouwei python3 cli.py maintain recompute-importance --half-life 30 --dry-run
 
 # 冲突候选（同标签 + 中等相似度 + 时间跨度大，仅产清单）
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain suggest-conflicts
+conda run -n zhouwei python3 cli.py maintain suggest-conflicts
 
 # 一键夜间维护：自动跑 importance + dormant，并产出 merge / conflict 候选清单
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain nightly
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain nightly --dry-run
+conda run -n zhouwei python3 cli.py maintain nightly
+conda run -n zhouwei python3 cli.py maintain nightly --dry-run
+
+# 质量审计（只读，不修改数据）
+conda run -n zhouwei python3 cli.py maintain audit-quality --public-only --limit 20
+conda run -n zhouwei python3 cli.py maintain audit-quality --skip-review-candidates
+conda run -n zhouwei python3 cli.py maintain audit-quality --include-private --limit 20
+
+# 来源治理（先 dry-run）
+conda run -n zhouwei python3 cli.py maintain backfill-source-agent --dry-run --include-private --limit 0
 ```
 
 ### nightly 输出结构
@@ -254,13 +273,13 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py maintain nightly --d
 
 ```bash
 # 导出所有公开记忆为 JSON
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py export -o backup.json
+conda run -n zhouwei python3 cli.py export -o backup.json
 
 # 导出私密记忆（含已归档）
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py export -o backup.json --private --include-archived
+conda run -n zhouwei python3 cli.py export -o backup.json --private --include-archived
 
 # 从 JSON 文件导入
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py import backup.json
+conda run -n zhouwei python3 cli.py import backup.json
 ```
 
 ---
@@ -268,7 +287,7 @@ conda run -n zhouwei python3 ~/.qclaw/skills/memoria/cli.py import backup.json
 ## Web 管理界面
 
 ```bash
-conda run -n zhouwei python3 ~/.qclaw/skills/memoria/server/app.py --port 8000
+conda run -n zhouwei python3 server/app.py --port 8000
 # 访问 http://localhost:8000
 ```
 

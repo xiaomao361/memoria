@@ -308,8 +308,10 @@ CLI/API candidates:
 Write policy:
 
 - Manual user writes can still go directly to durable memory.
-- Agent writes should default to candidates unless explicitly trusted.
+- On this device, local agents default to trusted durable writes.
 - A trusted agent can be allowed direct writes only with a clear source and kind.
+- Candidate staging remains for uncertain, external, or delegated outputs that
+  still need review.
 
 ### 5. Memory Lifecycle Management
 
@@ -420,9 +422,9 @@ CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   description TEXT,
-  trust_level TEXT NOT NULL DEFAULT 'candidate_only',
+  trust_level TEXT NOT NULL DEFAULT 'trusted_writer',
   can_read_private INTEGER DEFAULT 0,
-  can_write_durable INTEGER DEFAULT 0,
+  can_write_durable INTEGER DEFAULT 1,
   created_at TEXT NOT NULL
 );
 
@@ -566,7 +568,7 @@ Expected edit areas:
 - Do not add full task/workspace orchestration.
 - Do not make a large desktop app here.
 - Do not require a cloud service.
-- Do not make agent outputs automatically trusted by default.
+- Do not make unknown external agent outputs automatically trusted by default.
 
 ## Success Definition
 
@@ -578,4 +580,3 @@ Memoria is successful as a shared agent memory substrate when:
 - Recall can return structured context, not only flat search results.
 - Users and agents can see why items were recalled.
 - Memory quality issues can be surfaced and resolved without corrupting source data.
-

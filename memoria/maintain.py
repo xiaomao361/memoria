@@ -5,10 +5,11 @@ import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from .config import STORE_DIR, DORMANT_DAYS
+from .config import STORE_DIR, DORMANT_DAYS, load_label_aliases
 from .db import get_conn, init_db
 from .vector import upsert_vector, search_vectors, delete_vector, reset_collection
 from .filestore import list_all_files, parse_memory_file, extract_links, update_file_metadata
+from .core import _extract_summary, _normalize_labels, _sync_file_labels
 
 
 def _as_bool(value) -> bool:
@@ -46,9 +47,9 @@ def rebuild() -> dict:
 
                 mid = meta.get("id") or meta.get("memory_id") or filepath.stem
                 content = meta.get("content", "")
-                summary = content[:200] if content else ""
-                tags = meta.get("tags", [])
-                links = meta.get("links", []) or extract_links(content)
+                summary = _extract_summary(content) if content else ""
+                tags = _normalize_labels(meta.get("tags", []))
+                links = _normalize_labels(meta.get("links", []) or extract_links(content), apply_aliases=False)
                 source = meta.get("source", "migrated")
                 created = meta.get("created", meta.get("created_at", ""))
                 archived = _as_bool(meta.get("archived", False))
@@ -85,7 +86,7 @@ def rebuild() -> dict:
                     for tag in tags:
                         conn.execute(
                             "INSERT OR IGNORE INTO labels (memory_id, name, type) VALUES (?, ?, 'tag')",
-                            (mid, tag.lower() if isinstance(tag, str) else str(tag)),
+                            (mid, tag),
                         )
                     for link in links:
                         conn.execute(
@@ -108,6 +109,388 @@ def rebuild() -> dict:
                 print(f"  ERROR: {filepath.name}: {e}")
 
     return {"imported": imported, "errors": errors}
+
+
+def repair_summaries(dry_run: bool = True, limit: int = 0, private: Optional[bool] = None) -> dict:
+    """重算空 summary，修复旧迁移数据里 `## 摘要` 后空行导致的空摘要。"""
+    init_db()
+    sql = """SELECT id, summary, content, private, archived, status
+             FROM memories
+             WHERE COALESCE(summary, '') = ''"""
+    params: list = []
+    if private is not None:
+        sql += " AND private = ?"
+        params.append(int(private))
+    sql += " ORDER BY created_at"
+    if limit and limit > 0:
+        sql += " LIMIT ?"
+        params.append(limit)
+
+    updates = []
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+        for row in rows:
+            summary = _extract_summary(row["content"] or "").strip()
+            if not summary:
+                continue
+            updates.append({
+                "id": row["id"],
+                "private": bool(row["private"]),
+                "summary": summary[:120],
+            })
+            if dry_run:
+                continue
+
+            conn.execute(
+                "UPDATE memories SET summary = ?, updated_at = ? WHERE id = ?",
+                (summary, datetime.now(timezone.utc).isoformat(), row["id"]),
+            )
+            conn.execute("DELETE FROM memories_fts WHERE id = ?", (row["id"],))
+            conn.execute(
+                "INSERT INTO memories_fts (id, summary, content) VALUES (?, ?, ?)",
+                (row["id"], summary, row["content"] or ""),
+            )
+            if not row["archived"] and (row["status"] or "active") in ("active", "pinned"):
+                upsert_vector(row["id"], f"{summary}\n{row['content'] or ''}", private=bool(row["private"]))
+
+    return {
+        "dry_run": dry_run,
+        "scanned": len(rows) if 'rows' in locals() else 0,
+        "updated": len(updates),
+        "samples": updates[:20],
+    }
+
+
+SOURCE_AGENT_BACKFILL_MAP = {
+    "clara": "clara",
+    "codex": "codex",
+    "hermes": "hermes",
+    "lara": "hermes",
+}
+
+
+def backfill_source_agent(
+    dry_run: bool = True,
+    limit: int = 0,
+    include_private: bool = False,
+) -> dict:
+    """
+    按历史 source 字段回填 source_agent。
+
+    只处理确定映射，不对 `manual` 做内容猜测：
+    - clara -> clara
+    - codex -> codex
+    - hermes -> hermes
+    - lara -> hermes
+    """
+    init_db()
+    private_sql = "" if include_private else " AND private = 0"
+    source_names = tuple(SOURCE_AGENT_BACKFILL_MAP)
+    placeholders = ",".join("?" for _ in source_names)
+
+    manual_normalized = []
+    known_agents = ("clara", "codex", "hermes")
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""SELECT id, summary, source, source_agent, private, file_path
+                FROM memories
+                WHERE COALESCE(source_agent, '') = ''
+                  AND lower(COALESCE(source, '')) IN ({placeholders})
+                  {private_sql}
+                ORDER BY created_at""",
+            source_names,
+        ).fetchall()
+
+        manual_unresolved = conn.execute(
+            f"""SELECT count(*) FROM memories
+                WHERE COALESCE(source_agent, '') = ''
+                  AND lower(COALESCE(source, '')) = 'manual'
+                  {private_sql}"""
+        ).fetchone()[0]
+
+        updates = []
+        for row in rows:
+            mapped_agent = SOURCE_AGENT_BACKFILL_MAP[(row["source"] or "").lower()]
+            updates.append({
+                "id": row["id"],
+                "summary": (row["summary"] or "")[:120],
+                "source": row["source"],
+                "source_agent": mapped_agent,
+                "private": bool(row["private"]),
+            })
+            if dry_run:
+                continue
+
+            conn.execute(
+                "UPDATE memories SET source_agent = ?, updated_at = ? WHERE id = ?",
+                (mapped_agent, datetime.now(timezone.utc).isoformat(), row["id"]),
+            )
+            if row["file_path"]:
+                _sync_file_labels(conn, row["id"])
+
+            if limit and limit > 0 and len(updates) >= limit:
+                break
+
+        manual_rows = conn.execute(
+            f"""SELECT id, summary, source, source_agent, private, file_path
+                FROM memories
+                WHERE lower(COALESCE(source, '')) = 'manual'
+                  AND lower(COALESCE(source_agent, '')) IN ({','.join('?' for _ in known_agents)})
+                  {private_sql}
+                ORDER BY created_at""",
+            known_agents,
+        ).fetchall()
+
+        for row in manual_rows:
+            normalized_source = (row["source_agent"] or "").lower()
+            manual_normalized.append({
+                "id": row["id"],
+                "summary": (row["summary"] or "")[:120],
+                "old_source": row["source"],
+                "new_source": normalized_source,
+                "source_agent": row["source_agent"],
+                "private": bool(row["private"]),
+            })
+            if dry_run:
+                continue
+
+            conn.execute(
+                "UPDATE memories SET source = ?, updated_at = ? WHERE id = ?",
+                (normalized_source, datetime.now(timezone.utc).isoformat(), row["id"]),
+            )
+            if row["file_path"]:
+                _sync_file_labels(conn, row["id"])
+
+    return {
+        "dry_run": dry_run,
+        "include_private": include_private,
+        "scanned": len(rows) if 'rows' in locals() else 0,
+        "updated": len(updates),
+        "normalized_manual_source": len(manual_normalized),
+        "manual_unresolved": manual_unresolved,
+        "mapping": SOURCE_AGENT_BACKFILL_MAP,
+        "samples": updates[:20],
+        "manual_normalized_samples": manual_normalized[:20],
+    }
+
+
+def audit_quality(
+    limit: int = 10,
+    include_private: bool = False,
+    include_review_candidates: bool = True,
+) -> dict:
+    """
+    只读质量审计。
+
+    目标是给 Codex/Hermes 下一步处理足够结构化的信号，不直接修改记忆库。
+    """
+    init_db()
+    sample_limit = max(limit, 0)
+    scope_sql = "" if include_private else " AND private = 0"
+
+    def _sample_rows(conn, where_sql: str, params: tuple = ()) -> dict:
+        count = conn.execute(
+            f"SELECT count(*) FROM memories WHERE {where_sql}{scope_sql}",
+            params,
+        ).fetchone()[0]
+        rows = []
+        if sample_limit > 0:
+            rows = conn.execute(
+                f"""SELECT id, summary, source, source_agent, kind, authority,
+                           retrieval_role, status, private, created_at
+                    FROM memories
+                    WHERE {where_sql}{scope_sql}
+                    ORDER BY created_at DESC
+                    LIMIT ?""",
+                (*params, sample_limit),
+            ).fetchall()
+        return {
+            "count": count,
+            "samples": [_memory_quality_sample(row) for row in rows],
+        }
+
+    with get_conn() as conn:
+        total = conn.execute(
+            f"SELECT count(*) FROM memories WHERE 1 = 1{scope_sql}"
+        ).fetchone()[0]
+        active = conn.execute(
+            f"""SELECT count(*) FROM memories
+                WHERE archived = 0
+                  AND COALESCE(status, 'active') IN ('active', 'pinned')
+                  {scope_sql}"""
+        ).fetchone()[0]
+        pending_candidates = conn.execute(
+            "SELECT count(*) FROM memory_candidates WHERE status = 'pending'"
+        ).fetchone()[0]
+
+        issues = {
+            "empty_summary": _sample_rows(conn, "COALESCE(summary, '') = ''"),
+            "short_summary": _sample_rows(
+                conn,
+                "COALESCE(summary, '') != '' AND length(summary) < ?",
+                (12,),
+            ),
+            "missing_source_agent_for_agent_like_source": _sample_rows(
+                conn,
+                """COALESCE(source_agent, '') = ''
+                   AND lower(COALESCE(source, '')) IN
+                       ('agent', 'agent_candidate', 'codex', 'hermes', 'lara', 'clara', 'claude', 'gemini')""",
+            ),
+            "default_metadata": _sample_rows(
+                conn,
+                """COALESCE(kind, 'fact') = 'fact'
+                   AND COALESCE(authority, 'confirmed') = 'confirmed'
+                   AND COALESCE(retrieval_role, 'background') = 'background'""",
+            ),
+            "model_generated_durable": _sample_rows(
+                conn,
+                """COALESCE(authority, '') = 'model_generated'
+                   AND archived = 0
+                   AND COALESCE(status, 'active') IN ('active', 'pinned')""",
+            ),
+        }
+
+        agent_rows = conn.execute(
+            """SELECT id, name, trust_level, can_write_durable, can_read_private
+               FROM agents ORDER BY id"""
+        ).fetchall()
+        recent_writer_rows = conn.execute(
+            f"""SELECT id, summary, source, source_agent, kind, authority,
+                       retrieval_role, status, private, created_at
+                FROM memories
+                WHERE COALESCE(source_agent, '') != ''
+                  {scope_sql}
+                ORDER BY created_at DESC
+                LIMIT ?""",
+            (sample_limit,),
+        ).fetchall() if sample_limit > 0 else []
+
+        source_agent_counts = conn.execute(
+            f"""SELECT COALESCE(source_agent, '(missing)') AS source_agent, count(*) AS count
+                FROM memories
+                WHERE 1 = 1{scope_sql}
+                GROUP BY COALESCE(source_agent, '(missing)')
+                ORDER BY count DESC
+                LIMIT ?""",
+            (max(sample_limit, 1),),
+        ).fetchall()
+
+    review = {
+        "merge_candidates": {"count": None, "samples": []},
+        "conflict_candidates": {"count": None, "samples": []},
+    }
+    if include_review_candidates:
+        merge_candidates = suggest_merge(limit=sample_limit or 10, private=False)
+        conflict_candidates = suggest_conflicts(limit=sample_limit or 10, private=False)
+        if include_private:
+            merge_candidates.extend(
+                {**candidate, "_private": True}
+                for candidate in suggest_merge(limit=sample_limit or 10, private=True)
+            )
+            conflict_candidates.extend(
+                {**candidate, "_private": True}
+                for candidate in suggest_conflicts(limit=sample_limit or 10, private=True)
+            )
+        review = {
+            "merge_candidates": {
+                "count": len(merge_candidates),
+                "samples": merge_candidates[:sample_limit] if sample_limit else [],
+            },
+            "conflict_candidates": {
+                "count": len(conflict_candidates),
+                "samples": conflict_candidates[:sample_limit] if sample_limit else [],
+            },
+        }
+
+    non_trusted_agents = [
+        _agent_quality_sample(row)
+        for row in agent_rows
+        if row["trust_level"] != "trusted_writer" or not row["can_write_durable"]
+    ]
+    recommendations = _quality_recommendations(issues, review, pending_candidates, non_trusted_agents)
+
+    return {
+        "dry_run": True,
+        "scope": {
+            "include_private": include_private,
+            "sample_limit": sample_limit,
+            "review_candidates": include_review_candidates,
+        },
+        "totals": {
+            "memories": total,
+            "active": active,
+            "pending_candidates": pending_candidates,
+            "agents": len(agent_rows),
+        },
+        "agents": {
+            "non_trusted_or_non_durable": non_trusted_agents,
+            "all": [_agent_quality_sample(row) for row in agent_rows],
+        },
+        "source_agent_counts": [
+            {"source_agent": row["source_agent"], "count": row["count"]}
+            for row in source_agent_counts
+        ],
+        "issues": issues,
+        "review_candidates": review,
+        "recent_trusted_writer_writes": [
+            _memory_quality_sample(row) for row in recent_writer_rows
+        ],
+        "recommendations": recommendations,
+    }
+
+
+def _memory_quality_sample(row) -> dict:
+    return {
+        "id": row["id"],
+        "summary": (row["summary"] or "")[:120],
+        "source": row["source"],
+        "source_agent": row["source_agent"],
+        "kind": row["kind"],
+        "authority": row["authority"],
+        "retrieval_role": row["retrieval_role"],
+        "status": row["status"],
+        "private": bool(row["private"]),
+        "created_at": row["created_at"],
+    }
+
+
+def _agent_quality_sample(row) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "trust_level": row["trust_level"],
+        "can_write_durable": bool(row["can_write_durable"]),
+        "can_read_private": bool(row["can_read_private"]),
+    }
+
+
+def _quality_recommendations(
+    issues: dict,
+    review: dict,
+    pending_candidates: int,
+    non_trusted_agents: list[dict],
+) -> list[str]:
+    recommendations = []
+    if issues["empty_summary"]["count"]:
+        recommendations.append("Run `maintain repair-summaries` before relying on context packs.")
+    if issues["default_metadata"]["count"]:
+        recommendations.append("Run `maintain classify-metadata --dry-run` to reduce default metadata.")
+    if issues["missing_source_agent_for_agent_like_source"]["count"]:
+        recommendations.append("Backfill source_agent for agent-like writes where provenance is clear.")
+    if issues["model_generated_durable"]["count"]:
+        recommendations.append("Review durable model_generated memories and either confirm or move them to candidate flow.")
+    if pending_candidates:
+        recommendations.append("Review pending candidates before nightly maintenance accumulates more queue items.")
+    if non_trusted_agents:
+        recommendations.append("Align local device agents to trusted_writer if they should follow the current policy.")
+    if review["merge_candidates"]["count"]:
+        recommendations.append("Review merge candidates and merge only after semantic confirmation.")
+    if review["conflict_candidates"]["count"]:
+        recommendations.append("Review conflict candidates and mark stale/superseded memories explicitly.")
+    if not recommendations:
+        recommendations.append("No immediate quality repair is required; continue using recall-context on real handoffs.")
+    return recommendations
 
 
 def suggest_merge(limit: int = 10, private: bool = False, threshold: float = 0.85) -> list[dict]:
@@ -352,6 +735,54 @@ def suggest_conflicts(
     return candidates
 
 
+def get_stats() -> dict:
+    """
+    正确统计记忆库各项数字，供汇报使用。
+    """
+    init_db()
+    with get_conn() as conn:
+        total = conn.execute("SELECT count(*) FROM memories").fetchone()[0]
+        active = conn.execute(
+            """SELECT count(*) FROM memories
+               WHERE archived = 0
+                 AND COALESCE(status, 'active') != 'archived'"""
+        ).fetchone()[0]
+        archived = conn.execute(
+            """SELECT count(*) FROM memories
+               WHERE archived = 1
+                 OR COALESCE(status, 'active') = 'archived'"""
+        ).fetchone()[0]
+        private_total = conn.execute(
+            "SELECT count(*) FROM memories WHERE private = 1"
+        ).fetchone()[0]
+        private_active = conn.execute(
+            """SELECT count(*) FROM memories
+               WHERE private = 1
+                 AND archived = 0
+                 AND COALESCE(status, 'active') != 'archived'"""
+        ).fetchone()[0]
+        private_archived = conn.execute(
+            """SELECT count(*) FROM memories
+               WHERE private = 1
+                 AND (archived = 1
+                      OR COALESCE(status, 'active') = 'archived')"""
+        ).fetchone()[0]
+        public_total = total - private_total
+    return {
+        "total": total,
+        "active": active,
+        "archived": archived,
+        "private": {
+            "total": private_total,
+            "active": private_active,
+            "archived": private_archived,
+        },
+        "public": {
+            "total": public_total,
+        },
+    }
+
+
 def nightly(dry_run: bool = False) -> dict:
     """
     每晚一次性维护：
@@ -362,6 +793,7 @@ def nightly(dry_run: bool = False) -> dict:
     report = {
         "ran_at": started,
         "dry_run": dry_run,
+        "stats": get_stats(),
         "auto": {
             "importance": recompute_importance(dry_run=dry_run),
             "dormant": dormant_sweep(dry_run=dry_run),
@@ -374,6 +806,73 @@ def nightly(dry_run: bool = False) -> dict:
         },
     }
     return report
+
+
+def canonicalize_labels(dry_run: bool = True, include_private: bool = True) -> dict:
+    """
+    将历史标签按当前 alias 配置归一到 canonical tag。
+
+    只处理 type='tag'，不改 links。
+    """
+    init_db()
+    changes = []
+
+    with get_conn() as conn:
+        sql = """SELECT l.memory_id, l.name, m.private
+                 FROM labels l
+                 JOIN memories m ON l.memory_id = m.id
+                 WHERE l.type = 'tag'"""
+        params: list = []
+        if not include_private:
+            sql += " AND m.private = 0"
+        rows = conn.execute(sql, params).fetchall()
+
+        by_memory = {}
+        for row in rows:
+            by_memory.setdefault(row["memory_id"], {"private": bool(row["private"]), "labels": []})
+            by_memory[row["memory_id"]]["labels"].append(row["name"])
+
+        for memory_id, payload in by_memory.items():
+            normalized = _normalize_labels(payload["labels"])
+            original = []
+            seen = set()
+            for label in payload["labels"]:
+                if label in seen:
+                    continue
+                seen.add(label)
+                original.append(label)
+            if original == normalized:
+                continue
+
+            changes.append({
+                "memory_id": memory_id,
+                "before": original,
+                "after": normalized,
+                "private": payload["private"],
+            })
+
+            if not dry_run:
+                conn.execute(
+                    "DELETE FROM labels WHERE memory_id = ? AND type = 'tag'",
+                    (memory_id,),
+                )
+                for tag in normalized:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO labels (memory_id, name, type) VALUES (?, ?, 'tag')",
+                        (memory_id, tag),
+                    )
+                conn.execute(
+                    "UPDATE memories SET updated_at = ? WHERE id = ?",
+                    (datetime.now(timezone.utc).isoformat(), memory_id),
+                )
+                _sync_file_labels(conn, memory_id)
+
+    return {
+        "dry_run": dry_run,
+        "include_private": include_private,
+        "updated": len(changes),
+        "samples": changes[:20],
+    }
 
 
 def classify_metadata(
@@ -465,6 +964,72 @@ def classify_metadata(
     }
 
 
+def audit_labels(limit: int = 50, include_private: bool = False) -> dict:
+    """
+    查看标签分布并给出疑似同义标签建议。
+
+    这里只做启发式提示，不自动合并。
+    """
+    init_db()
+    alias_groups = load_label_aliases()
+    alias_map = {
+        variant: canonical
+        for canonical, variants in alias_groups.items()
+        for variant in variants
+    }
+
+    with get_conn() as conn:
+        sql = """SELECT l.name, COUNT(DISTINCT l.memory_id) AS count
+                 FROM labels l
+                 JOIN memories m ON l.memory_id = m.id
+                 WHERE l.type = 'tag'
+                   AND m.archived = 0
+                   AND COALESCE(m.status, 'active') IN ('active', 'pinned')"""
+        params: list = []
+        if not include_private:
+            sql += " AND m.private = 0"
+        sql += " GROUP BY l.name ORDER BY count DESC, l.name ASC"
+        if limit > 0:
+            sql += " LIMIT ?"
+            params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
+
+    labels = [{"name": row["name"], "count": row["count"]} for row in rows]
+    grouped = {}
+    for row in labels:
+        canonical = alias_map.get(row["name"], row["name"])
+        grouped.setdefault(canonical, []).append(row)
+
+    alias_conflicts = []
+    for canonical, members in grouped.items():
+        if len(members) <= 1:
+            continue
+        alias_conflicts.append({
+            "canonical": canonical,
+            "variants": sorted(members, key=lambda item: (-item["count"], item["name"])),
+        })
+
+    fuzzy_candidates = []
+    for idx, current in enumerate(labels):
+        current_name = current["name"]
+        for other in labels[idx + 1:]:
+            other_name = other["name"]
+            if current_name == other_name:
+                continue
+            if _looks_like_alias_pair(current_name, other_name):
+                fuzzy_candidates.append({
+                    "canonical_suggestion": min(current_name, other_name, key=len),
+                    "variants": sorted([current, other], key=lambda item: (-item["count"], item["name"])),
+                })
+
+    return {
+        "labels": labels,
+        "alias_conflicts": alias_conflicts,
+        "fuzzy_candidates": fuzzy_candidates[:20],
+        "alias_config": alias_groups,
+    }
+
+
 def _needs_metadata_backfill(row) -> bool:
     return (
         (row["kind"] or "fact") == "fact"
@@ -476,34 +1041,75 @@ def _needs_metadata_backfill(row) -> bool:
 def _classify_memory_metadata(row) -> Optional[dict]:
     text = f"{row['summary'] or ''}\n{row['content'] or ''}".lower()
     source = (row["source"] or "").lower()
-    source_agent = (row["source_agent"] or "").lower()
+    summary = (row["summary"] or "").lower()
     technical_entity_terms = [
         "sql", "sqlite", "python", "api", "endpoint", "schema", "migration",
         "vector", "embedding", "fastapi", "streamlit", "chromadb", "http",
         "script", ".py", "workspace", "artifacts/",
-        "frontend", "backend", "server", "cli", "db", "table",
+        "frontend", "backend", "server", "cli", "db", "table", "mcp",
+        "gateway", "open_id", "dify", "llm", "rag", "训练",
     ]
     technical_action_terms = ["发布", "修复", "脚本", "工具", "界面", "重构", "同步", "bug"]
 
-    if source_agent or source.startswith("agent") or source == "agent_candidate":
-        return _metadata_suggestion("agent_observation", "model_generated", "background", "agent source")
+    hard_constraint_phrases = [
+        "禁止", "hard constraint", "记住并在重大决策时提醒",
+        "以后 codex", "后续写memoria必须", "后续写 memoria 必须",
+        "默认使用", "固定使用", "沉默成本不参与重大决策",
+        "不应该影响当前决策", "统计逻辑必须基于实际数据源",
+        "流程必须补全", "必须先走工程论", "必须添加 codex 标签",
+        "必须指定 --source-agent", "不能再写manual", "不能再写 manual",
+    ]
+    if (
+        _has_any(text, hard_constraint_phrases)
+        or (
+            "用户要求" in text
+            and _has_any(text, ["必须", "不能", "以后", "默认", "固定"])
+        )
+        or (
+            "教训" in text
+            and _has_any(text, ["必须", "不能", "不要", "先确认"])
+        )
+    ):
+        return _metadata_suggestion("decision", "user_decision", "hard_constraint", "hard-constraint keywords")
 
     if _has_any(text, [
-        "用户决定", "定了", "先按", "就这么定", "hard constraint", "决议",
-        "确定从", "明确采用", "不做", "不要做", "禁止",
+        "用户偏好", "用户喜欢", "用户希望", "用户想要", "偏好", "更喜欢",
+        "要求 lara 更频繁", "以后随手发", "以后主动", "默认用中文",
+        "约定：以后", "约定:以后", "约定：以后随手", "约定: 以后随手",
+    ]):
+        return _metadata_suggestion("preference", "user_preference", "background", "preference keywords")
+
+    if _has_any(text, [
+        "用户决定", "定了", "先按", "就这么定", "决议",
+        "确定从", "明确采用", "已决定", "约定：", "约定:",
     ]) and not _has_any(text, [
         "讨论", "考虑", "想法", "方案未定", "候选", "建议", "也许", "可能",
     ]):
-        return _metadata_suggestion("decision", "user_decision", "hard_constraint", "decision keywords")
+        return _metadata_suggestion("decision", "user_decision", "prior_judgment", "decision keywords")
 
     if _has_any(text, [
-        "当前项目状态", "当前状态", "项目状态", "进展", "状态：", "status:",
+        "当前项目状态", "当前状态", "项目状态", "项目进展", "系统状态", "运行状态", "status:",
         "next step", "下一步", "继续做", "进行到", "已完成", "已实现",
         "phase ", "phase-", "已接上", "已补上", "已跑通",
+        "落地位置", "迁移完成", "迁移到", "已添加", "已更新", "已重启",
+        "启动——", "项目启动", "架构澄清", "核心：", "方案：",
     ]) and not _has_any(text, [
         "想法", "方案未定", "考虑", "候选", "也许", "可能", "讨论",
     ]):
         return _metadata_suggestion("project_state", "confirmed", "current_state", "project-state keywords")
+
+    if _has_any(text, [
+        "冒了个念头", "新想法", "还没想清楚", "先记下来", "想做类似", "想写",
+        "方向", "灵感", "idea",
+    ]) and _has_any(text, [
+        "还没", "没想好", "念头", "灵感", "方向", "想法",
+    ]):
+        return _metadata_suggestion("idea", "inferred", "background", "idea keywords")
+
+    if _has_any(summary, [
+        "新朋友", "open_id", "第一次对话", "[[clara]] 新朋友",
+    ]):
+        return _metadata_suggestion("person_context", "confirmed", "background", "person-context keywords")
 
     if _has_any(text, technical_entity_terms) or (
         _has_any(text, technical_action_terms)
@@ -523,8 +1129,16 @@ def _classify_memory_metadata(row) -> Optional[dict]:
     ]):
         return _metadata_suggestion("event", "observed", "background", "event keywords")
 
+    if _has_any(text, [
+        "讨论", "深聊记录", "聊了很久", "转述", "问了自己", "从记忆中翻出",
+    ]):
+        return _metadata_suggestion("conversation_summary", "observed", "background", "conversation keywords")
+
     if re.search(r"\b(todo|fixme|note)\b", text):
         return _metadata_suggestion("technical_note", "confirmed", "reference", "generic note keywords")
+
+    if source in ("agent_candidate", "candidate", "external", "delegated"):
+        return _metadata_suggestion("agent_observation", "model_generated", "background", "candidate or external source")
 
     return None
 
@@ -540,3 +1154,16 @@ def _metadata_suggestion(kind: str, authority: str, retrieval_role: str, reason:
 
 def _has_any(text: str, needles: list[str]) -> bool:
     return any(needle in text for needle in needles)
+
+
+def _looks_like_alias_pair(left: str, right: str) -> bool:
+    shorter, longer = sorted([left, right], key=len)
+    if shorter == longer:
+        return False
+    if shorter in longer and len(longer) - len(shorter) <= 4:
+        return True
+    suffixes = ("项目", "project", "proj")
+    for suffix in suffixes:
+        if longer == f"{shorter}{suffix}" or longer == f"{shorter} {suffix}":
+            return True
+    return False

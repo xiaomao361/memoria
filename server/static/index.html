@@ -905,15 +905,15 @@ body::before {
               <input id="agent-id" placeholder="代理 ID" />
               <input id="agent-name" placeholder="显示名称" />
               <select id="agent-trust-level">
+                <option value="trusted_writer" selected>可信写入</option>
                 <option value="candidate_only">仅候选</option>
-                <option value="trusted_writer">可信写入</option>
                 <option value="private_allowed">可读受限</option>
                 <option value="read_only">只读</option>
               </select>
               <input id="agent-description" class="full-span" placeholder="说明（可选）" />
               <div class="full-span checkbox-row">
                 <label><input type="checkbox" id="agent-can-read-private" /> 可读取受限内容</label>
-                <label><input type="checkbox" id="agent-can-write-durable" /> 可写入正式记忆</label>
+                <label><input type="checkbox" id="agent-can-write-durable" checked /> 可写入正式记忆</label>
               </div>
               <div class="full-span">
                 <button class="btn btn-primary" onclick="createAgentFromForm()">保存代理</button>
@@ -1204,6 +1204,8 @@ async function createAgentFromForm() {
   document.getElementById('agent-id').value = '';
   document.getElementById('agent-name').value = '';
   document.getElementById('agent-description').value = '';
+  document.getElementById('agent-trust-level').value = 'trusted_writer';
+  document.getElementById('agent-can-write-durable').checked = true;
   loadAgents();
 }
 
@@ -1323,7 +1325,7 @@ function renderAgentList(agents) {
           <div class="table-title">${escapeHtml(agent.name || agent.id)}</div>
           <div class="muted-copy">${escapeHtml(agent.id)}</div>
         </div>
-        <span class="status-chip status-${escapeHtml(agent.trust_level || 'candidate_only')}">${escapeHtml(formatTrustLevel(agent.trust_level || 'candidate_only'))}</span>
+        <span class="status-chip status-${escapeHtml(agent.trust_level || 'trusted_writer')}">${escapeHtml(formatTrustLevel(agent.trust_level || 'trusted_writer'))}</span>
       </div>
       <div class="meta-row">
         ${renderMetaChip(agent.can_read_private ? '可读受限内容' : '仅公开内容')}
