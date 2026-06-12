@@ -40,6 +40,25 @@ from memoria.core import (
 )
 
 
+INTERPRETATION_MARKERS = (
+    "信任", "关系更近", "更亲近", "依赖", "亲密", "情绪状态",
+    "trust", "closer", "relationship", "depends on", "intimacy",
+)
+
+
+def fact_boundary_warnings(content: str) -> list[str]:
+    text = (content or "").lower()
+    if not text:
+        return []
+    if any(marker.lower() in text for marker in INTERPRETATION_MARKERS):
+        return [
+            "This content may describe an interpretation rather than an observable fact. "
+            "Memoria should store observed facts; current position or relationship interpretation "
+            "belongs in Continuity."
+        ]
+    return []
+
+
 def cmd_store(args):
     content = args.content
     if content == "-":
@@ -62,6 +81,9 @@ def cmd_store(args):
         source_agent=args.source_agent,
         source_run_id=args.source_run_id,
     )
+    warnings = fact_boundary_warnings(content)
+    if warnings:
+        result["warnings"] = warnings
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
@@ -216,6 +238,7 @@ def cmd_candidate(args):
             print(json.dumps({"error": "content is required for candidate add"}))
             sys.exit(1)
         tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
+        warnings = fact_boundary_warnings(content)
         result = create_candidate(
             content=content,
             tags=tags,
@@ -228,6 +251,8 @@ def cmd_candidate(args):
             proposed_retrieval_role=args.retrieval_role or "background",
             confidence=args.confidence if args.confidence is not None else 0.7,
         )
+        if warnings:
+            result["warnings"] = warnings
     elif args.action == "list":
         result = list_candidates(
             status=args.status,
@@ -330,7 +355,10 @@ def cmd_agent_store(args):
     except ValueError as exc:
         print(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2))
         sys.exit(1)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+        warnings = fact_boundary_warnings(content)
+        if warnings:
+            result["warnings"] = warnings
+        print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def cmd_agent_recall(args):
