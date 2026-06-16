@@ -1,4 +1,4 @@
-# Memoria v6.9 — AI Agent 通用记忆系统
+# Memoria v6.9.1 — AI Agent 通用记忆系统
 
 > 跨会话记忆持久化。SQLite + 向量语义检索 + Markdown 文件存储。
 
@@ -63,7 +63,6 @@ server/
 ├── app.py                    # FastAPI Web 服务
 └── static/index.html         # 前端
 cli.py                        # CLI 入口
-migrate.py                    # v5 → v6 迁移工具
 ```
 
 ---
@@ -163,7 +162,7 @@ conda run -n zhouwei python3 server/app.py --port 8000
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
-| v6.9 | 2026-06-01 | 标签别名系统、候选记忆审核流、Agent trust policy、状态生命周期完善；Web 控制台全面中文化 |
+| v6.9.1 | 2026-06-16 | RRF 混合检索融合（向量 + FTS 并行搜索，Reciprocal Rank Fusion 排序，importance 加权）；移除 adapters/ 目录 |\n| v6.9 | 2026-06-01 | 标签别名系统、候选记忆审核流、Agent trust policy、状态生命周期完善；Web 控制台全面中文化 |
 | v6.8 | 2026-05-29 | Web 管理台升级为共享记忆控制台：新增结构化上下文、候选区审核、代理策略视图，并完成中文化文案收口 |
 | v6.7 | 2026-05-29 | 共享 agent 记忆 Phase 3：新增 agents registry 与 agent trust policy，支持 agent-store 自动路由到 durable memory 或 candidate |
 | v6.6 | 2026-05-28 | 共享 agent 记忆 Phase 2：新增 memory_candidates 审核流，支持 candidate add/list/accept/reject 与对应 API |

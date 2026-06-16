@@ -3,6 +3,7 @@
 import json
 import re
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -52,26 +53,6 @@ def _normalize_labels(labels: Optional[list[str]], apply_aliases: bool = True) -
         out.append(name)
     return out
 
-
-def _json_dumps(value) -> str:
-    return json.dumps(value, ensure_ascii=False)
-
-
-def _json_loads(value, default):
-    if not value:
-        return default
-    try:
-        return json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return default
-
-
-def _normalize_agent_trust_level(trust_level: str) -> str:
-    allowed = {"candidate_only", "trusted_writer", "read_only", "private_allowed"}
-    normalized = (trust_level or "trusted_writer").strip().lower()
-    if normalized not in allowed:
-        raise ValueError(f"invalid trust_level: {trust_level}")
-    return normalized
 
 
 def _sync_file_labels(conn, memory_id: str) -> None:
@@ -366,19 +347,27 @@ def _recall_by_query(
     query: str, limit: int, private: bool,
     include_archived: bool, include_content: bool, include_statuses: Optional[list[str]],
 ) -> list[dict]:
-    # 1. 向量语义搜索
+    # 1. 向量 + FTS 并行搜索
     vec_results = search_vectors(query, limit=limit * 2, private=private)
-    if not vec_results:
-        return _recall_fts(query, limit, private, include_archived, include_content, include_statuses)
+    fts_ids = _recall_fts_ids(query, limit * 2, private, include_archived, include_statuses)
 
-    vec_ids = [r["id"] for r in vec_results]
-    score_map = {r["id"]: r["score"] for r in vec_results}
+    # 2. RRF 融合 (Reciprocal Rank Fusion)
+    RANK_CONST = 60
+    scores = defaultdict(float)
+    for i, r in enumerate(vec_results):
+        scores[r["id"]] += 1.0 / (i + RANK_CONST)
+    for i, mid in enumerate(fts_ids):
+        scores[mid] += 1.0 / (i + RANK_CONST)
 
-    # 2. 从 SQLite 获取完整信息
+    candidate_ids = list(scores.keys())
+    if not candidate_ids:
+        return []
+
+    # 3. 从 SQLite 获取完整信息
     with get_conn() as conn:
-        placeholders = ",".join("?" for _ in vec_ids)
+        placeholders = ",".join("?" for _ in candidate_ids)
         sql = f"SELECT * FROM memories WHERE id IN ({placeholders}) AND private = ?"
-        params: list = vec_ids + [int(private)]
+        params: list = candidate_ids + [int(private)]
         if not include_archived:
             sql += " AND archived = 0 AND COALESCE(status, 'active') IN ('active', 'pinned')"
         elif include_statuses:
@@ -390,12 +379,37 @@ def _recall_by_query(
         results = []
         for row in rows:
             d = _row_to_dict(row, include_content)
-            d["score"] = score_map.get(row["id"], 0.0)
+            # RRF * 0.8 + importance * 0.2
+            d["score"] = scores.get(row["id"], 0) * 0.8 + row["importance"] * 0.2
             results.append(d)
             _touch_recall(conn, row["id"])
 
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
     return results[:limit]
+
+
+def _recall_fts_ids(
+    query: str, limit: int, private: bool,
+    include_archived: bool, include_statuses: Optional[list[str]],
+) -> list[str]:
+    """FTS5 全文搜索，只返回 ID 列表（用于 RRF 融合）"""
+    with get_conn() as conn:
+        sql = """
+            SELECT m.id FROM memories m
+            JOIN memories_fts f ON m.id = f.id
+            WHERE memories_fts MATCH ? AND m.private = ?
+        """
+        params: list = [query, int(private)]
+        if not include_archived:
+            sql += " AND m.archived = 0 AND COALESCE(m.status, 'active') IN ('active', 'pinned')"
+        elif include_statuses:
+            placeholders_status = ",".join("?" for _ in include_statuses)
+            sql += f" AND COALESCE(m.status, 'active') IN ({placeholders_status})"
+            params.extend(include_statuses)
+        sql += " LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
+        return [r["id"] for r in rows]
 
 
 def _recall_fts(
@@ -763,688 +777,3 @@ def import_memories(data: list[dict]) -> dict:
         )
         imported += 1
     return {"imported": imported, "skipped": skipped}
-
-
-# ═══════════════════════════════════════════════════════════
-# CANDIDATES
-# ═══════════════════════════════════════════════════════════
-
-
-def create_candidate(
-    content: str,
-    tags: Optional[list[str]] = None,
-    source: str = "agent_candidate",
-    source_agent: Optional[str] = None,
-    source_run_id: Optional[str] = None,
-    private: bool = False,
-    proposed_kind: str = "fact",
-    proposed_authority: str = "model_generated",
-    proposed_retrieval_role: str = "background",
-    confidence: float = 0.7,
-    candidate_id: Optional[str] = None,
-) -> dict:
-    init_db()
-    cid = candidate_id or str(uuid.uuid4())
-    now = _now()
-    normalized_tags = _normalize_labels(tags)
-    summary = _extract_summary(content)
-
-    with get_conn() as conn:
-        conn.execute(
-            """INSERT OR REPLACE INTO memory_candidates
-               (id, content, summary, proposed_tags, proposed_kind, proposed_authority,
-                proposed_retrieval_role, confidence, source, source_agent, source_run_id,
-                private, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                cid, content, summary, _json_dumps(normalized_tags), proposed_kind,
-                proposed_authority, proposed_retrieval_role, confidence, source,
-                source_agent, source_run_id, int(private), "pending", now,
-            ),
-        )
-
-    return {"id": cid, "status": "pending"}
-
-
-def list_candidates(
-    status: Optional[str] = "pending",
-    limit: int = 20,
-    offset: int = 0,
-    source_agent: Optional[str] = None,
-) -> list[dict]:
-    init_db()
-    with get_conn() as conn:
-        sql = "SELECT * FROM memory_candidates WHERE 1 = 1"
-        params: list = []
-        if status:
-            sql += " AND status = ?"
-            params.append(status)
-        if source_agent:
-            sql += " AND source_agent = ?"
-            params.append(source_agent)
-        sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        rows = conn.execute(sql, params).fetchall()
-        return [_candidate_row_to_dict(row) for row in rows]
-
-
-def get_candidate(candidate_id: str) -> Optional[dict]:
-    init_db()
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT * FROM memory_candidates WHERE id = ?",
-            (candidate_id,),
-        ).fetchone()
-        return _candidate_row_to_dict(row) if row else None
-
-
-def promote_candidate(
-    candidate_id: str,
-    reviewed_by: Optional[str] = None,
-    review_note: Optional[str] = None,
-    content: Optional[str] = None,
-    tags: Optional[list[str]] = None,
-    kind: Optional[str] = None,
-    authority: Optional[str] = None,
-    retrieval_role: Optional[str] = None,
-    confidence: Optional[float] = None,
-    status: str = "active",
-    source: Optional[str] = None,
-    source_agent: Optional[str] = None,
-    source_run_id: Optional[str] = None,
-    private: Optional[bool] = None,
-    merge_from: Optional[list[str]] = None,
-) -> dict:
-    init_db()
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT * FROM memory_candidates WHERE id = ?",
-            (candidate_id,),
-        ).fetchone()
-        if not row:
-            raise ValueError("candidate not found")
-        if row["status"] not in ("pending",):
-            raise ValueError(f"candidate already reviewed: {row['status']}")
-
-    candidate = _candidate_row_to_dict(row)
-    final_content = content if content is not None else candidate["content"]
-    final_tags = _normalize_labels(tags if tags is not None else candidate["proposed_tags"])
-    final_kind = kind or candidate["proposed_kind"] or "fact"
-    final_authority = authority or candidate["proposed_authority"] or "model_generated"
-    final_role = retrieval_role or candidate["proposed_retrieval_role"] or "background"
-    final_confidence = confidence if confidence is not None else candidate["confidence"]
-    final_source = source or candidate["source"]
-    final_source_agent = source_agent if source_agent is not None else candidate["source_agent"]
-    final_source_run_id = source_run_id if source_run_id is not None else candidate["source_run_id"]
-    final_private = bool(candidate["private"]) if private is None else private
-
-    store_result = store(
-        content=final_content,
-        tags=final_tags,
-        source=final_source,
-        private=final_private,
-        merge_from=merge_from,
-        kind=final_kind,
-        authority=final_authority,
-        retrieval_role=final_role,
-        confidence=final_confidence,
-        status=status,
-        source_agent=final_source_agent,
-        source_run_id=final_source_run_id,
-    )
-
-    reviewed_at = _now()
-    reviewed_status = "accepted"
-    edited = any([
-        content is not None,
-        tags is not None,
-        kind is not None,
-        authority is not None,
-        retrieval_role is not None,
-        confidence is not None,
-        source is not None,
-        source_agent is not None,
-        source_run_id is not None,
-        private is not None,
-        bool(merge_from),
-        status != "active",
-    ])
-    if edited:
-        reviewed_status = "edited"
-    if merge_from:
-        reviewed_status = "merged"
-
-    with get_conn() as conn:
-        conn.execute(
-            """UPDATE memory_candidates
-               SET status = ?, review_note = ?, reviewed_at = ?, reviewed_by = ?,
-                   promoted_memory_id = ?
-               WHERE id = ?""",
-            (
-                reviewed_status, review_note, reviewed_at, reviewed_by,
-                store_result["id"], candidate_id,
-            ),
-        )
-
-    return {
-        "id": candidate_id,
-        "status": reviewed_status,
-        "promoted_memory_id": store_result["id"],
-        "memory_status": store_result["status"],
-    }
-
-
-def reject_candidate(
-    candidate_id: str,
-    reviewed_by: Optional[str] = None,
-    review_note: Optional[str] = None,
-    status: str = "rejected",
-) -> dict:
-    if status not in ("rejected", "discarded"):
-        raise ValueError("invalid candidate status")
-    init_db()
-    reviewed_at = _now()
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT status FROM memory_candidates WHERE id = ?",
-            (candidate_id,),
-        ).fetchone()
-        if not row:
-            raise ValueError("candidate not found")
-        if row["status"] not in ("pending",):
-            raise ValueError(f"candidate already reviewed: {row['status']}")
-        conn.execute(
-            """UPDATE memory_candidates
-               SET status = ?, review_note = ?, reviewed_at = ?, reviewed_by = ?
-               WHERE id = ?""",
-            (status, review_note, reviewed_at, reviewed_by, candidate_id),
-        )
-    return {"id": candidate_id, "status": status}
-
-
-def _candidate_row_to_dict(row) -> dict:
-    return {
-        "id": row["id"],
-        "content": row["content"],
-        "summary": row["summary"],
-        "proposed_tags": _json_loads(row["proposed_tags"], []),
-        "proposed_kind": row["proposed_kind"],
-        "proposed_authority": row["proposed_authority"],
-        "proposed_retrieval_role": row["proposed_retrieval_role"],
-        "confidence": row["confidence"],
-        "source": row["source"],
-        "source_agent": row["source_agent"],
-        "source_run_id": row["source_run_id"],
-        "private": bool(row["private"]),
-        "status": row["status"],
-        "review_note": row["review_note"],
-        "created_at": row["created_at"],
-        "reviewed_at": row["reviewed_at"],
-        "reviewed_by": row["reviewed_by"],
-        "promoted_memory_id": row["promoted_memory_id"],
-    }
-
-
-# ═══════════════════════════════════════════════════════════
-# AGENTS
-# ═══════════════════════════════════════════════════════════
-
-
-def register_agent(
-    agent_id: str,
-    name: str,
-    description: Optional[str] = None,
-    trust_level: str = "trusted_writer",
-    can_read_private: bool = False,
-    can_write_durable: Optional[bool] = None,
-) -> dict:
-    init_db()
-    normalized_trust_level = _normalize_agent_trust_level(trust_level)
-    if can_write_durable is None:
-        can_write_durable = normalized_trust_level == "trusted_writer"
-    created_at = _now()
-    with get_conn() as conn:
-        existing = conn.execute(
-            "SELECT created_at FROM agents WHERE id = ?",
-            (agent_id,),
-        ).fetchone()
-        conn.execute(
-            """INSERT OR REPLACE INTO agents
-               (id, name, description, trust_level, can_read_private, can_write_durable, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                agent_id, name, description, normalized_trust_level,
-                int(can_read_private), int(can_write_durable),
-                existing["created_at"] if existing else created_at,
-            ),
-        )
-    return get_agent(agent_id)
-
-
-def get_agent(agent_id: str) -> Optional[dict]:
-    init_db()
-    with get_conn() as conn:
-        row = conn.execute("SELECT * FROM agents WHERE id = ?", (agent_id,)).fetchone()
-        return _agent_row_to_dict(row) if row else None
-
-
-def list_agents(limit: int = 100, offset: int = 0) -> list[dict]:
-    init_db()
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM agents ORDER BY created_at DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        ).fetchall()
-        return [_agent_row_to_dict(row) for row in rows]
-
-
-def recall_for_agent(
-    agent_id: str,
-    query: Optional[str] = None,
-    tags: Optional[list[str]] = None,
-    memory_id: Optional[str] = None,
-    limit: int = 10,
-    offset: int = 0,
-    private: bool = False,
-    include_archived: bool = False,
-    include_content: bool = False,
-    include_statuses: Optional[list[str]] = None,
-) -> dict:
-    init_db()
-    agent = get_agent(agent_id)
-    if not agent:
-        raise ValueError("agent not registered")
-
-    allow_private = private and agent["can_read_private"]
-    if private and not agent["can_read_private"]:
-        raise ValueError("agent is not allowed to read private memory")
-
-    if memory_id:
-        item = get_memory(memory_id)
-        if not item:
-            return {
-                "agent_id": agent_id,
-                "private_scope": allow_private,
-                "memories": [],
-                "count": 0,
-            }
-        if item["private"] and not allow_private:
-            raise ValueError("agent is not allowed to read private memory")
-        if not item["private"] and private:
-            return {
-                "agent_id": agent_id,
-                "private_scope": allow_private,
-                "memories": [],
-                "count": 0,
-            }
-        if not include_archived and item["archived"]:
-            return {
-                "agent_id": agent_id,
-                "private_scope": allow_private,
-                "memories": [],
-                "count": 0,
-            }
-        if include_statuses and item["status"] not in include_statuses:
-            return {
-                "agent_id": agent_id,
-                "private_scope": allow_private,
-                "memories": [],
-                "count": 0,
-            }
-        if not include_archived and item["status"] not in ("active", "pinned"):
-            return {
-                "agent_id": agent_id,
-                "private_scope": allow_private,
-                "memories": [],
-                "count": 0,
-            }
-        return {
-            "agent_id": agent_id,
-            "private_scope": allow_private,
-            "memories": [item if include_content else {k: v for k, v in item.items() if k != "content"}],
-            "count": 1,
-        }
-
-    results = recall(
-        query=query,
-        tags=tags,
-        limit=limit,
-        offset=offset,
-        private=allow_private,
-        include_archived=include_archived,
-        include_content=include_content,
-        include_statuses=include_statuses,
-    )
-    return {
-        "agent_id": agent_id,
-        "private_scope": allow_private,
-        "memories": results,
-        "count": len(results),
-    }
-
-
-def recall_context(
-    query: str,
-    agent_id: Optional[str] = None,
-    project: Optional[str] = None,
-    private: bool = False,
-    include_kinds: Optional[list[str]] = None,
-    exclude_statuses: Optional[list[str]] = None,
-    limit: int = 20,
-    include_content: bool = False,
-) -> dict:
-    init_db()
-    if not query:
-        raise ValueError("query is required")
-
-    if agent_id:
-        base = recall_for_agent(
-            agent_id=agent_id,
-            query=query,
-            limit=max(limit * 2, limit),
-            private=private,
-            include_archived=True,
-            include_content=include_content,
-        )
-        items = list(base["memories"])
-        private_scope = base["private_scope"]
-    else:
-        items = recall(
-            query=query,
-            limit=max(limit * 2, limit),
-            private=private,
-            include_archived=True,
-            include_content=include_content,
-        )
-        private_scope = private
-
-    normalized_kinds = {k.strip().lower() for k in include_kinds or [] if k and k.strip()}
-    excluded_statuses = {s.strip().lower() for s in exclude_statuses or [] if s and s.strip()}
-    if not excluded_statuses:
-        excluded_statuses = {"archived", "stale", "discarded"}
-
-    filtered = []
-    for item in items:
-        if normalized_kinds and (item.get("kind") or "").lower() not in normalized_kinds:
-            continue
-        status = (item.get("status") or "active").lower()
-        if status in excluded_statuses:
-            continue
-        filtered.append(item)
-
-    ranked = []
-    for item in filtered:
-        ranked.append(_enrich_context_item(item, query=query, project=project))
-    ranked.sort(key=lambda x: x["score"], reverse=True)
-    ranked = ranked[:limit]
-
-    context_pack = {
-        "current_state": [],
-        "hard_constraints": [],
-        "prior_decisions": [],
-        "background": [],
-        "references": [],
-        "forbidden_directions": [],
-    }
-    for item in ranked:
-        bucket = _context_bucket(item)
-        context_pack[bucket].append(_context_pack_entry(item))
-
-    return {
-        "query": query,
-        "agent_id": agent_id,
-        "scope": {
-            "project": project,
-            "private": private_scope,
-        },
-        "context_pack": context_pack,
-        "items": ranked,
-    }
-
-
-def store_from_agent(
-    agent_id: str,
-    content: str,
-    tags: Optional[list[str]] = None,
-    source: str = "agent",
-    private: bool = False,
-    merge_from: Optional[list[str]] = None,
-    kind: str = "fact",
-    authority: Optional[str] = None,
-    retrieval_role: str = "background",
-    confidence: Optional[float] = None,
-    status: str = "active",
-    source_run_id: Optional[str] = None,
-) -> dict:
-    init_db()
-    agent = get_agent(agent_id)
-    if not agent:
-        raise ValueError("agent not registered")
-
-    trust_level = agent["trust_level"]
-    if trust_level == "read_only":
-        raise ValueError("read_only agent cannot write memory")
-
-    if private and not agent["can_read_private"]:
-        raise ValueError("agent is not allowed to write private memory")
-
-    normalized_source = agent_id if (source or "").lower() in ("", "agent", "manual") else source
-    write_durable = trust_level == "trusted_writer" and agent["can_write_durable"]
-    if write_durable:
-        result = store(
-            content=content,
-            tags=tags,
-            source=normalized_source,
-            private=private,
-            merge_from=merge_from,
-            kind=kind,
-            authority=authority or "confirmed",
-            retrieval_role=retrieval_role,
-            confidence=1.0 if confidence is None else confidence,
-            status=status,
-            source_agent=agent_id,
-            source_run_id=source_run_id,
-        )
-        return {
-            "route": "durable_memory",
-            "agent_id": agent_id,
-            "agent_trust_level": trust_level,
-            "memory_id": result["id"],
-            "memory_status": result["status"],
-        }
-
-    candidate = create_candidate(
-        content=content,
-        tags=tags,
-        source=source if (source or "").lower() not in ("", "agent", "manual") else "agent_candidate",
-        source_agent=agent_id,
-        source_run_id=source_run_id,
-        private=private,
-        proposed_kind=kind,
-        proposed_authority=authority or "model_generated",
-        proposed_retrieval_role=retrieval_role,
-        confidence=0.7 if confidence is None else confidence,
-    )
-    return {
-        "route": "candidate",
-        "agent_id": agent_id,
-        "agent_trust_level": trust_level,
-        "candidate_id": candidate["id"],
-        "candidate_status": candidate["status"],
-    }
-
-
-def _agent_row_to_dict(row) -> dict:
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "description": row["description"],
-        "trust_level": row["trust_level"],
-        "can_read_private": bool(row["can_read_private"]),
-        "can_write_durable": bool(row["can_write_durable"]),
-        "created_at": row["created_at"],
-    }
-
-
-def _enrich_context_item(item: dict, query: str, project: Optional[str] = None) -> dict:
-    semantic = float(item.get("score") or 0.0)
-    importance_boost = min(float(item.get("importance") or 0.0), 1.0) * 0.08
-    authority_map = {
-        "user_decision": 0.14,
-        "user_preference": 0.12,
-        "confirmed": 0.1,
-        "observed": 0.08,
-        "inferred": 0.03,
-        "model_generated": -0.04,
-        "draft": -0.06,
-    }
-    role_map = {
-        "hard_constraint": 0.18,
-        "current_state": 0.15,
-        "prior_judgment": 0.12,
-        "reference": 0.08,
-        "background": 0.04,
-        "example": 0.03,
-        "forbidden_direction": 0.18,
-    }
-    status_penalty_map = {
-        "active": 0.0,
-        "pinned": 0.06,
-        "superseded": -0.15,
-        "conflicted": -0.12,
-        "archived": -0.2,
-        "stale": -0.25,
-        "discarded": -0.4,
-    }
-    authority = item.get("authority") or "confirmed"
-    retrieval_role = item.get("retrieval_role") or "background"
-    status = item.get("status") or "active"
-    authority_boost = authority_map.get(authority, 0.0)
-    role_boost = role_map.get(retrieval_role, 0.0)
-    status_penalty = status_penalty_map.get(status, 0.0)
-    confidence_term = (float(item.get("confidence") or 1.0) - 0.5) * 0.08
-    haystack = " ".join([
-        item.get("summary") or "",
-        item.get("content") or "" if "content" in item else "",
-    ])
-    lexical_boost = _lexical_query_boost(query=query, haystack=haystack)
-    project_boost = 0.0
-    if project:
-        if _normalized_contains(haystack, project):
-            project_boost = 0.12
-
-    total = (
-        semantic + importance_boost + authority_boost + role_boost
-        + confidence_term + lexical_boost + project_boost + status_penalty
-    )
-    total = round(total, 4)
-    enriched = dict(item)
-    enriched["score"] = total
-    enriched["reason"] = _build_context_reason(
-        semantic=semantic,
-        authority=authority,
-        retrieval_role=retrieval_role,
-        lexical_boost=lexical_boost,
-        project_boost=project_boost,
-        status=status,
-    )
-    enriched["score_parts"] = {
-        "semantic": round(semantic, 4),
-        "importance": round(importance_boost, 4),
-        "authority": round(authority_boost, 4),
-        "role": round(role_boost, 4),
-        "confidence": round(confidence_term, 4),
-        "lexical": round(lexical_boost, 4),
-        "project": round(project_boost, 4),
-        "status_penalty": round(status_penalty, 4),
-    }
-    return enriched
-
-
-def _build_context_reason(
-    semantic: float,
-    authority: str,
-    retrieval_role: str,
-    lexical_boost: float,
-    project_boost: float,
-    status: str,
-) -> str:
-    parts = []
-    if semantic > 0:
-        parts.append("semantic match")
-    if lexical_boost > 0:
-        parts.append("lexical match")
-    if authority in ("user_decision", "user_preference", "confirmed", "observed"):
-        parts.append(authority.replace("_", " "))
-    if retrieval_role:
-        parts.append(retrieval_role.replace("_", " "))
-    if project_boost > 0:
-        parts.append("project match")
-    if status == "pinned":
-        parts.append("pinned")
-    if not parts:
-        parts.append("metadata match")
-    return " + ".join(parts)
-
-
-def _lexical_query_boost(query: str, haystack: str) -> float:
-    terms = _query_terms(query)
-    if not terms:
-        return 0.0
-    normalized_haystack = _normalize_search_text(haystack)
-    matches = sum(1 for term in terms if term in normalized_haystack)
-    if matches == 0:
-        return 0.0
-    return min(0.04 * matches, 0.16)
-
-
-def _query_terms(query: str) -> list[str]:
-    normalized = re.sub(r"[^a-z0-9_\u4e00-\u9fff]+", " ", (query or "").lower())
-    terms = []
-    for term in re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]{2,}", normalized):
-        if len(term) < 3 and not re.match(r"[\u4e00-\u9fff]{2,}", term):
-            continue
-        terms.append(_normalize_search_text(term))
-    return sorted(set(terms))
-
-
-def _normalized_contains(haystack: str, needle: str) -> bool:
-    normalized_haystack = _normalize_search_text(haystack)
-    normalized_needle = _normalize_search_text(needle)
-    return bool(normalized_needle and normalized_needle in normalized_haystack)
-
-
-def _normalize_search_text(value: str) -> str:
-    return re.sub(r"[^a-z0-9_\u4e00-\u9fff]+", "", (value or "").lower())
-
-
-def _context_bucket(item: dict) -> str:
-    role = item.get("retrieval_role") or "background"
-    kind = item.get("kind") or "fact"
-    if role == "hard_constraint":
-        return "hard_constraints"
-    if role == "current_state" or kind == "project_state":
-        return "current_state"
-    if role == "forbidden_direction":
-        return "forbidden_directions"
-    if role == "reference":
-        return "references"
-    if kind == "decision" or role == "prior_judgment":
-        return "prior_decisions"
-    return "background"
-
-
-def _context_pack_entry(item: dict) -> dict:
-    return {
-        "id": item["id"],
-        "summary": item["summary"],
-        "kind": item["kind"],
-        "authority": item["authority"],
-        "retrieval_role": item["retrieval_role"],
-        "confidence": item["confidence"],
-        "source": item["source"],
-        "source_agent": item["source_agent"],
-        "source_run_id": item["source_run_id"],
-        "score": item["score"],
-        "reason": item["reason"],
-    }

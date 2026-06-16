@@ -40,37 +40,6 @@ CREATE TABLE IF NOT EXISTS labels (
     FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS memory_candidates (
-    id TEXT PRIMARY KEY,
-    content TEXT NOT NULL,
-    summary TEXT,
-    proposed_tags TEXT,
-    proposed_kind TEXT,
-    proposed_authority TEXT,
-    proposed_retrieval_role TEXT,
-    confidence REAL DEFAULT 0.7,
-    source TEXT NOT NULL,
-    source_agent TEXT,
-    source_run_id TEXT,
-    private INTEGER DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'pending',
-    review_note TEXT,
-    created_at TEXT NOT NULL,
-    reviewed_at TEXT,
-    reviewed_by TEXT,
-    promoted_memory_id TEXT
-);
-
-CREATE TABLE IF NOT EXISTS agents (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    description TEXT,
-    trust_level TEXT NOT NULL DEFAULT 'trusted_writer',
-    can_read_private INTEGER DEFAULT 0,
-    can_write_durable INTEGER DEFAULT 1,
-    created_at TEXT NOT NULL
-);
-
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     id UNINDEXED, summary, content, tokenize='unicode61'
 );
@@ -80,9 +49,6 @@ CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_private ON memories(private);
 CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(archived);
-CREATE INDEX IF NOT EXISTS idx_candidates_status ON memory_candidates(status, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_candidates_agent ON memory_candidates(source_agent, status);
-CREATE INDEX IF NOT EXISTS idx_agents_trust ON agents(trust_level, can_write_durable);
 """
 
 MIGRATIONS = [

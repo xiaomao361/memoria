@@ -680,9 +680,6 @@ body::before {
     <div class="nav">
       <div class="nav-item active" data-view="dashboard"><span class="icon">◉</span>概览</div>
       <div class="nav-item" data-view="search"><span class="icon">⌕</span>搜索</div>
-      <div class="nav-item" data-view="context"><span class="icon">↗</span>上下文</div>
-      <div class="nav-item" data-view="candidates"><span class="icon">△</span>候选区</div>
-      <div class="nav-item" data-view="agents"><span class="icon">◇</span>代理</div>
       <div class="nav-item" data-view="graph"><span class="icon">◎</span>图谱</div>
       <div class="nav-item" data-view="labels"><span class="icon">#</span>标签</div>
       <div class="nav-item" data-view="recent"><span class="icon">☰</span>全部</div>
@@ -691,7 +688,7 @@ body::before {
       <div class="meta-card">
         <div class="meta-label">System</div>
         <div class="meta-value">结构化记忆已在线</div>
-        <div class="meta-sub">召回、审核、策略、图谱</div>
+        <div class="meta-sub">语义检索 · 标签过滤 · 图谱可视化</div>
       </div>
       <div class="nav-item" data-view="private" style="font-size:13px;color:var(--text-muted)"><span class="icon">◈</span>受限内容</div>
     </div>
@@ -713,8 +710,6 @@ body::before {
           <div class="hero-copy">检索、聚类、关系和分层访问不再只是数据操作，而是一个能让你快速感知系统状态的工作台。</div>
           <div class="hero-strip">
             <span class="hero-chip">语义搜索</span>
-            <span class="hero-chip">上下文召回</span>
-            <span class="hero-chip">候选审核</span>
             <span class="hero-chip">策略控制</span>
           </div>
         </div>
@@ -760,178 +755,6 @@ body::before {
           <button onclick="doSearch()">开始搜索</button>
         </div>
         <div class="memory-list" id="search-results"></div>
-      </div>
-    </div>
-    <div id="view-context" class="hidden">
-      <div class="view-head">
-        <div>
-          <div class="view-kicker">Context Recall</div>
-          <div class="page-title">结构化上下文</div>
-          <div class="page-subtitle">把召回结果按约束、现状、决策、参考资料分组，直接检查上下文包的质量。</div>
-        </div>
-      </div>
-      <div class="split-layout">
-        <div class="section-card">
-          <div class="section-heading">
-            <h3>上下文包</h3>
-            <span id="context-result-note">等待查询</span>
-          </div>
-          <div class="context-groups" id="context-results">
-            <div class="empty-state">输入查询后生成结构化上下文结果</div>
-          </div>
-        </div>
-        <div class="panel-stack">
-          <div class="section-card">
-            <div class="section-heading">
-              <h3>查询参数</h3>
-              <span>面向 agent 和项目的召回调试</span>
-            </div>
-            <div class="form-grid">
-              <textarea id="context-query" placeholder="例如：memoria 下一步的共享记忆治理工作"></textarea>
-              <input id="context-agent-id" placeholder="代理 ID（可选）" />
-              <input id="context-project" placeholder="项目名（可选）" />
-              <input id="context-kinds" placeholder="限定类型，逗号分隔" />
-              <input id="context-limit" type="number" min="1" max="50" value="12" />
-              <div class="full-span checkbox-row">
-                <label><input type="checkbox" id="context-private" /> 包含受限内容</label>
-                <label><input type="checkbox" id="context-include-content" /> 附带原文</label>
-              </div>
-              <div class="full-span">
-                <button class="btn btn-primary" onclick="runContextRecall()">生成上下文包</button>
-              </div>
-            </div>
-          </div>
-          <div class="section-card">
-            <div class="section-heading">
-              <h3>说明</h3>
-              <span>当前分桶</span>
-            </div>
-            <div class="mini-stat-grid">
-              <div class="mini-stat"><div class="label">约束</div><div class="value" id="context-hard-count">0</div></div>
-              <div class="mini-stat"><div class="label">现状</div><div class="value" id="context-current-count">0</div></div>
-              <div class="mini-stat"><div class="label">决策</div><div class="value" id="context-decision-count">0</div></div>
-              <div class="mini-stat"><div class="label">参考</div><div class="value" id="context-reference-count">0</div></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div id="view-candidates" class="hidden">
-      <div class="view-head">
-        <div>
-          <div class="view-kicker">Candidate Review</div>
-          <div class="page-title">候选记忆</div>
-          <div class="page-subtitle">代理输出先进入候选区，再由人工审核进入正式记忆。</div>
-        </div>
-      </div>
-      <div class="split-layout">
-        <div class="section-card">
-          <div class="toolbar">
-            <select id="candidate-status-filter" onchange="loadCandidates()">
-              <option value="pending">待审核</option>
-              <option value="accepted">已接收</option>
-              <option value="rejected">已驳回</option>
-              <option value="discarded">已丢弃</option>
-              <option value="">全部状态</option>
-            </select>
-            <input id="candidate-agent-filter" placeholder="来源代理" />
-            <button class="btn" onclick="loadCandidates()">刷新</button>
-            <span class="spacer"></span>
-            <span class="muted-copy" id="candidate-count-note">0 条候选</span>
-          </div>
-          <div class="table-list" id="candidate-list">
-            <div class="empty-state">暂无候选记忆</div>
-          </div>
-        </div>
-        <div class="section-card">
-            <div class="section-heading">
-              <h3>手工补录</h3>
-              <span>直接创建候选记忆</span>
-            </div>
-            <div class="form-grid">
-              <textarea id="candidate-content" placeholder="候选记忆内容"></textarea>
-              <input id="candidate-tags" placeholder="标签，逗号分隔" />
-              <input id="candidate-source-agent" placeholder="来源代理" />
-            <select id="candidate-kind">
-              <option value="fact">fact</option>
-              <option value="decision">decision</option>
-              <option value="project_state">project_state</option>
-              <option value="technical_note">technical_note</option>
-              <option value="todo">todo</option>
-            </select>
-            <select id="candidate-role">
-              <option value="background">background</option>
-              <option value="current_state">current_state</option>
-              <option value="prior_decisions">prior_decisions</option>
-              <option value="references">references</option>
-              <option value="hard_constraints">hard_constraints</option>
-            </select>
-              <div class="full-span checkbox-row">
-                <label><input type="checkbox" id="candidate-private" /> 受限内容</label>
-              </div>
-              <div class="full-span">
-                <button class="btn btn-primary" onclick="createCandidateFromForm()">加入候选区</button>
-              </div>
-            </div>
-          </div>
-      </div>
-    </div>
-    <div id="view-agents" class="hidden">
-      <div class="view-head">
-        <div>
-          <div class="view-kicker">Agent Registry</div>
-          <div class="page-title">代理策略</div>
-          <div class="page-subtitle">管理信任级别、受限读取和正式写入能力，明确多代理边界。</div>
-        </div>
-      </div>
-      <div class="split-layout">
-        <div class="section-card">
-          <div class="toolbar">
-            <button class="btn" onclick="loadAgents()">刷新</button>
-            <span class="spacer"></span>
-            <span class="muted-copy" id="agent-count-note">0 个代理</span>
-          </div>
-          <div class="table-list" id="agent-list">
-            <div class="empty-state">暂无 agent</div>
-          </div>
-        </div>
-        <div class="panel-stack">
-          <div class="section-card">
-            <div class="section-heading">
-              <h3>注册 Agent</h3>
-              <span>直接调用 `/api/agents`</span>
-            </div>
-            <div class="form-grid">
-              <input id="agent-id" placeholder="代理 ID" />
-              <input id="agent-name" placeholder="显示名称" />
-              <select id="agent-trust-level">
-                <option value="trusted_writer" selected>可信写入</option>
-                <option value="candidate_only">仅候选</option>
-                <option value="private_allowed">可读受限</option>
-                <option value="read_only">只读</option>
-              </select>
-              <input id="agent-description" class="full-span" placeholder="说明（可选）" />
-              <div class="full-span checkbox-row">
-                <label><input type="checkbox" id="agent-can-read-private" /> 可读取受限内容</label>
-                <label><input type="checkbox" id="agent-can-write-durable" checked /> 可写入正式记忆</label>
-              </div>
-              <div class="full-span">
-                <button class="btn btn-primary" onclick="createAgentFromForm()">保存代理</button>
-              </div>
-            </div>
-          </div>
-          <div class="section-card">
-            <div class="section-heading">
-              <h3>写入规则</h3>
-              <span>当前策略</span>
-            </div>
-            <div class="muted-copy">
-              <p>可信写入代理可直接进入正式记忆。</p>
-              <p>仅候选和可读受限代理默认先进入候选区。</p>
-              <p>只读代理禁止写入。</p>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
     <div id="view-graph" class="hidden">
@@ -1118,121 +941,6 @@ function unlockPrivate() {
 async function loadPrivate() {
   const data = await fetch(API + '/api/memories?limit=50&private=true').then(r => r.json());
   document.getElementById('private-list').innerHTML = renderList(data.memories);
-}
-
-async function loadCandidates() {
-  try {
-    const status = document.getElementById('candidate-status-filter').value;
-    const sourceAgent = document.getElementById('candidate-agent-filter').value.trim();
-    const params = new URLSearchParams({ limit: '50' });
-    if (status) params.set('status', status);
-    if (sourceAgent) params.set('source_agent', sourceAgent);
-    const data = await apiFetch(`/api/candidates?${params.toString()}`);
-    document.getElementById('candidate-count-note').textContent = `${data.count} 条候选`;
-    document.getElementById('candidate-list').innerHTML = renderCandidateList(data.candidates);
-  } catch (error) {
-    document.getElementById('candidate-list').innerHTML = renderErrorState(error);
-  }
-}
-
-async function createCandidateFromForm() {
-  const content = document.getElementById('candidate-content').value.trim();
-  if (!content) return alert('请填写候选内容');
-  await apiFetch('/api/candidates', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      content,
-      tags: splitCsv(document.getElementById('candidate-tags').value),
-      source_agent: document.getElementById('candidate-source-agent').value.trim() || null,
-      private: document.getElementById('candidate-private').checked,
-      kind: document.getElementById('candidate-kind').value,
-      retrieval_role: document.getElementById('candidate-role').value,
-    })
-  });
-  document.getElementById('candidate-content').value = '';
-  document.getElementById('candidate-tags').value = '';
-  loadCandidates();
-}
-
-async function acceptCandidate(id) {
-  const reviewedBy = prompt('审核人', 'codex') || 'codex';
-  await apiFetch(`/api/candidates/${id}/promote`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ reviewed_by: reviewedBy })
-  });
-  loadCandidates();
-}
-
-async function rejectCandidate(id, discard) {
-  const reviewedBy = prompt('审核人', 'codex') || 'codex';
-  await apiFetch(`/api/candidates/${id}/reject`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ reviewed_by: reviewedBy, status: discard ? 'discarded' : 'rejected' })
-  });
-  loadCandidates();
-}
-
-async function loadAgents() {
-  try {
-    const data = await apiFetch('/api/agents?limit=100');
-    document.getElementById('agent-count-note').textContent = `${data.count} 个代理`;
-    document.getElementById('agent-list').innerHTML = renderAgentList(data.agents);
-  } catch (error) {
-    document.getElementById('agent-list').innerHTML = renderErrorState(error);
-  }
-}
-
-async function createAgentFromForm() {
-  const id = document.getElementById('agent-id').value.trim();
-  const name = document.getElementById('agent-name').value.trim();
-  if (!id || !name) return alert('请填写 agent id 和 name');
-  await apiFetch('/api/agents', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-      id,
-      name,
-      description: document.getElementById('agent-description').value.trim() || null,
-      trust_level: document.getElementById('agent-trust-level').value,
-      can_read_private: document.getElementById('agent-can-read-private').checked,
-      can_write_durable: document.getElementById('agent-can-write-durable').checked,
-    })
-  });
-  document.getElementById('agent-id').value = '';
-  document.getElementById('agent-name').value = '';
-  document.getElementById('agent-description').value = '';
-  document.getElementById('agent-trust-level').value = 'trusted_writer';
-  document.getElementById('agent-can-write-durable').checked = true;
-  loadAgents();
-}
-
-async function runContextRecall() {
-  const query = document.getElementById('context-query').value.trim();
-  if (!query) return alert('请填写查询内容');
-  const limit = parseInt(document.getElementById('context-limit').value || '12', 10);
-  try {
-    const data = await apiFetch('/api/recall/context', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        query,
-        agent_id: document.getElementById('context-agent-id').value.trim() || null,
-        project: document.getElementById('context-project').value.trim() || null,
-        private: document.getElementById('context-private').checked,
-        include_content: document.getElementById('context-include-content').checked,
-        include_kinds: splitCsv(document.getElementById('context-kinds').value),
-        limit: Number.isFinite(limit) ? limit : 12,
-      })
-    });
-    document.getElementById('context-result-note').textContent = `召回 ${(data.items || []).length} 条`;
-    document.getElementById('context-results').innerHTML = renderContextPack(data.context_pack || {});
-  } catch (error) {
-    resetContextCounters();
-    document.getElementById('context-results').innerHTML = renderErrorState(error);
-  }
 }
 
 async function showDetail(id) {

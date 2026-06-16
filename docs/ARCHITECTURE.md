@@ -354,5 +354,4 @@ conda run -n zhouwei python3 server/app.py --port 8000
 │   ├── app.py                # FastAPI REST API
 │   └── static/index.html     # 中文前端（概览/搜索/图谱/标签/列表）
 ├── cli.py                    # CLI 入口
-└── migrate.py                # v5 → v6 迁移
 ```
