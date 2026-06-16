@@ -15,7 +15,7 @@ from memoria.core import (
     update_tags, get_labels, get_stats, get_graph_data,
 )
 
-app = FastAPI(title="Memoria", version="6.9.1")
+app = FastAPI(title="Memoria", version="6.10.0")
 
 STATIC_DIR = Path(__file__).parent / "static"
 

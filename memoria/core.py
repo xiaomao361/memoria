@@ -317,10 +317,10 @@ def recall(
         return _recall_by_id(memory_id, include_content)
 
     if tags:
-        return _recall_by_tags(tags, limit, private, include_archived, include_content, include_statuses)
+        return _recall_by_tags(tags, limit, offset, private, include_archived, include_content, include_statuses)
 
     if query:
-        return _recall_by_query(query, limit, private, include_archived, include_content, include_statuses)
+        return _recall_by_query(query, limit, offset, private, include_archived, include_content, include_statuses)
 
     return _recall_recent(limit, offset, private, include_archived, include_content, include_statuses)
 
@@ -337,10 +337,12 @@ def _recall_by_id(memory_id: str, include_content: bool) -> list[dict]:
 
 
 def _recall_by_tags(
-    tags: list[str], limit: int, private: bool,
+    tags: list[str], limit: int, offset: int, private: bool,
     include_archived: bool, include_content: bool, include_statuses: Optional[list[str]],
 ) -> list[dict]:
     tags = _normalize_labels(tags)
+    if not tags:
+        return []
     with get_conn() as conn:
         placeholders = ",".join("?" for _ in tags)
         sql = f"""
@@ -356,8 +358,8 @@ def _recall_by_tags(
             placeholders_status = ",".join("?" for _ in include_statuses)
             sql += f" AND COALESCE(m.status, 'active') IN ({placeholders_status})"
             params.extend(include_statuses)
-        sql += " ORDER BY m.importance DESC, m.created_at DESC LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY m.importance DESC, m.created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
 
         rows = conn.execute(sql, params).fetchall()
         for row in rows:
@@ -366,26 +368,33 @@ def _recall_by_tags(
 
 
 def _recall_by_query(
-    query: str, limit: int, private: bool,
+    query: str, limit: int, offset: int, private: bool,
     include_archived: bool, include_content: bool, include_statuses: Optional[list[str]],
 ) -> list[dict]:
-    # 1. 向量 + FTS 并行搜索
+    # 1. 三信号并行搜索
     vec_results = search_vectors(query, limit=limit * 2, private=private)
-    fts_ids = _recall_fts_ids(query, limit * 2, private, include_archived, include_statuses)
+    fts_scored = _recall_fts_scored(query, limit * 2, private, include_archived, include_statuses)
+    entity_scored = _entity_match_scored(query, limit * 2, private, include_archived, include_statuses)
 
-    # 2. RRF 融合 (Reciprocal Rank Fusion)
-    RANK_CONST = 60
+    # 2. 各信号归一化到 [0, 1]
+    vec_scores = _normalize_scores(vec_results, key="score")
+    bm25_scores = _normalize_scores(fts_scored, key="bm25_score")
+    entity_scores = _normalize_scores(entity_scored, key="entity_score")
+
+    # 3. 加权融合: 向量 0.40 + BM25 0.35 + 实体匹配 0.25
     scores = defaultdict(float)
-    for i, r in enumerate(vec_results):
-        scores[r["id"]] += 1.0 / (i + RANK_CONST)
-    for i, mid in enumerate(fts_ids):
-        scores[mid] += 1.0 / (i + RANK_CONST)
+    for mid, score in vec_scores.items():
+        scores[mid] += score * 0.40
+    for mid, score in bm25_scores.items():
+        scores[mid] += score * 0.35
+    for mid, score in entity_scores.items():
+        scores[mid] += score * 0.25
 
     candidate_ids = list(scores.keys())
     if not candidate_ids:
         return []
 
-    # 3. 从 SQLite 获取完整信息
+    # 4. 从 SQLite 获取完整信息
     with get_conn() as conn:
         placeholders = ",".join("?" for _ in candidate_ids)
         sql = f"SELECT * FROM memories WHERE id IN ({placeholders}) AND private = ?"
@@ -401,51 +410,79 @@ def _recall_by_query(
         results = []
         for row in rows:
             d = _row_to_dict(row, include_content)
-            # RRF * 0.8 + importance * 0.2
+            # 融合分 * 0.8 + importance * 0.2
             d["score"] = scores.get(row["id"], 0) * 0.8 + row["importance"] * 0.2
             results.append(d)
             _touch_recall(conn, row["id"])
 
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    return results[:limit]
+    return results[offset:offset + limit]
 
 
-def _recall_fts_ids(
+def _normalize_scores(scored: list[dict], key: str = "score") -> dict[str, float]:
+    """Min-max 归一化分数列表到 [0, 1]，返回 {id: normalized_score}"""
+    if not scored:
+        return {}
+    values = [r[key] for r in scored if r.get(key) is not None]
+    if not values:
+        return {}
+    vmin, vmax = min(values), max(values)
+    if vmax == vmin:
+        return {r["id"]: 1.0 for r in scored if r.get(key) is not None}
+    return {
+        r["id"]: (r[key] - vmin) / (vmax - vmin)
+        for r in scored if r.get(key) is not None
+    }
+
+
+def _recall_fts_scored(
     query: str, limit: int, private: bool,
     include_archived: bool, include_statuses: Optional[list[str]],
-) -> list[str]:
-    """FTS5 全文搜索，只返回 ID 列表（用于 RRF 融合）。
-    FTS5 无结果时用 LIKE 兜底，避免 CJK 短词 token 化边界导致漏结果。
+) -> list[dict]:
+    """FTS5 BM25 搜索，返回 [{id, bm25_score}]。
+    bm25() 返回负值（越小越相关），此处取反使 higher=better，与其他信号一致。
+    FTS5 语法规避或无结果时用 LIKE 兜底。
     """
     sanitized = re.sub(r'[^\w一-鿿㐀-䶿\s]', ' ', (query or ""))
     sanitized = sanitized.strip()
     if not sanitized:
         return []
 
+    scored = []
+
     with get_conn() as conn:
-        # 1. FTS5 主搜索
-        fts_sql = """
-            SELECT m.id FROM memories m
-            JOIN memories_fts f ON m.id = f.id
-            WHERE memories_fts MATCH ? AND m.private = ?
-        """
-        params: list = [sanitized, int(private)]
-        if not include_archived:
-            fts_sql += " AND m.archived = 0 AND COALESCE(m.status, 'active') IN ('active', 'pinned')"
-        elif include_statuses:
-            placeholders_status = ",".join("?" for _ in include_statuses)
-            fts_sql += f" AND COALESCE(m.status, 'active') IN ({placeholders_status})"
-            params.extend(include_statuses)
-        fts_sql += " LIMIT ?"
-        params.append(limit)
-        rows = conn.execute(fts_sql, params).fetchall()
-        ids = [r["id"] for r in rows]
+        try:
+            # 1. FTS5 BM25 主搜索。裸 NOT/AND/OR 触发 syntax error → 兜底
+            fts_sql = """
+                SELECT m.id, bm25(memories_fts) AS bm25_score
+                FROM memories m
+                JOIN memories_fts f ON m.id = f.id
+                WHERE memories_fts MATCH ? AND m.private = ?
+            """
+            params: list = [sanitized, int(private)]
+            if not include_archived:
+                fts_sql += " AND m.archived = 0 AND COALESCE(m.status, 'active') IN ('active', 'pinned')"
+            elif include_statuses:
+                placeholders_status = ",".join("?" for _ in include_statuses)
+                fts_sql += f" AND COALESCE(m.status, 'active') IN ({placeholders_status})"
+                params.extend(include_statuses)
+            fts_sql += " ORDER BY bm25_score LIMIT ?"
+            params.append(limit)
+            rows = conn.execute(fts_sql, params).fetchall()
+            # 取反：bm25() 负值越小越相关 → 正数越大越相关
+            scored = [{"id": r["id"], "bm25_score": -(r["bm25_score"] or 0.0)} for r in rows]
+        except Exception:
+            # FTS5 语法错误（布尔操作符等）→ LIKE 兜底
+            pass
 
-    # 2. FTS5 无结果 → LIKE 兜底（CJK 单字 token 化时 FTS5 可能漏匹配）
-    if not ids:
+    # 2. FTS5 无结果或异常 → LIKE 兜底，分配降序伪分数保持排序区分度
+    if not scored:
         ids = _fallback_like_ids(sanitized, limit, private, include_archived, include_statuses)
+        n = len(ids)
+        if n > 0:
+            scored = [{"id": mid, "bm25_score": (n - i) / n} for i, mid in enumerate(ids)]
 
-    return ids
+    return scored
 
 
 def _fallback_like_ids(
@@ -469,6 +506,57 @@ def _fallback_like_ids(
         params.append(limit)
         rows = conn.execute(like_sql, params).fetchall()
         return [r["id"] for r in rows]
+
+
+def _entity_match_scored(
+    query: str, limit: int, private: bool,
+    include_archived: bool, include_statuses: Optional[list[str]],
+) -> list[dict]:
+    """实体匹配：从查询中提取关键词，在 labels 表中匹配，返回 [{id, entity_score}]"""
+    # 提取中文 2-4 字片段 + 英文单词
+    tokens = set()
+    # 英文单词
+    tokens.update(w.lower() for w in re.findall(r'[a-zA-Z]{2,}', query))
+    # 中文 2-4 字连续片段（CJK 范围与 FTS5 sanitizer 保持一致）
+    chars = re.sub(r'[^一-鿿㐀-䶿]', '', query)
+    for span in (2, 3, 4):
+        for i in range(len(chars) - span + 1):
+            tokens.add(chars[i:i + span])
+
+    if not tokens:
+        return []
+
+    token_list = sorted(tokens)  # 确定性顺序，避免 hash seed 差异
+
+    with get_conn() as conn:
+        placeholders = ",".join("?" for _ in token_list)
+        sql = f"""
+            SELECT l.memory_id, COUNT(DISTINCT l.name) AS matches
+            FROM labels l
+            JOIN memories m ON l.memory_id = m.id
+            WHERE l.name IN ({placeholders})
+              AND l.type IN ('tag', 'link')
+              AND m.private = ?
+        """
+        params: list = token_list + [int(private)]
+        if not include_archived:
+            sql += " AND m.archived = 0 AND COALESCE(m.status, 'active') IN ('active', 'pinned')"
+        elif include_statuses:
+            placeholders_status = ",".join("?" for _ in include_statuses)
+            sql += f" AND COALESCE(m.status, 'active') IN ({placeholders_status})"
+            params.extend(include_statuses)
+        sql += " GROUP BY l.memory_id ORDER BY matches DESC, m.created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
+
+    if not rows:
+        return []
+
+    max_matches = max(r["matches"] for r in rows)
+    return [
+        {"id": r["memory_id"], "entity_score": r["matches"] / max_matches if max_matches > 0 else 0.0}
+        for r in rows
+    ]
 
 
 
@@ -571,7 +659,7 @@ def delete_memory(memory_id: str) -> bool:
 
 
 def restore_memory(memory_id: str) -> bool:
-    """恢复已归档的记忆"""
+    """恢复已归档的记忆。先重建向量，再提交数据库，避免 DB 已活跃但向量缺失。"""
     init_db()
     with get_conn() as conn:
         row = conn.execute(
@@ -579,25 +667,28 @@ def restore_memory(memory_id: str) -> bool:
         ).fetchone()
         if not row:
             return False
-        conn.execute(
-            "UPDATE memories SET archived = 0, status = 'active', updated_at = ? WHERE id = ?",
-            (_now(), memory_id),
-        )
         file_path = row["file_path"]
         private = bool(row["private"])
         summary = row["summary"]
 
+    # 1. 先重建向量（在提交 DB 之前，失败则整体失败）
+    vector_ok = True
     if file_path:
         update_file_metadata(file_path, archived=False)
-
-    # 重新写入向量
-    if file_path:
         from .filestore import read_file
         file_data = read_file(file_path)
         if file_data:
             content = file_data.get("content", "")
-            upsert_vector(memory_id, f"{summary}\n{content}", private=private)
-    return True
+            vector_ok = upsert_vector(memory_id, f"{summary}\n{content}", private=private)
+
+    # 2. 向量重建成功后再提交 DB
+    if vector_ok:
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE memories SET archived = 0, status = 'active', updated_at = ? WHERE id = ?",
+                (_now(), memory_id),
+            )
+    return vector_ok
 
 
 def purge_memory(memory_id: str) -> bool:
