@@ -12,6 +12,24 @@ from .db import get_conn, init_db
 from .vector import upsert_vector, search_vectors, delete_vector
 from .filestore import write_file, extract_links, update_file_metadata
 
+INTERPRETATION_MARKERS = (
+    "信任", "关系更近", "更亲近", "依赖", "亲密", "情绪状态",
+    "trust", "closer", "relationship", "depends on", "intimacy",
+)
+
+
+def fact_boundary_warnings(content: str) -> list[str]:
+    text = (content or "").lower()
+    if not text:
+        return []
+    if any(marker.lower() in text for marker in INTERPRETATION_MARKERS):
+        return [
+            "This content may describe an interpretation rather than an observable fact. "
+            "Memoria should store observed facts; current position or relationship interpretation "
+            "belongs in Continuity."
+        ]
+    return []
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -261,11 +279,15 @@ def store(
                     delete_vector(old_id, private=bool(old_row["private"]))
             _sync_file_labels(conn, mid)
 
-    return {
+    result = {
         "id": mid,
         "file_path": file_path,
         "status": "ok" if vec_ok else "partial",
     }
+    warnings = fact_boundary_warnings(content)
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 # ═══════════════════════════════════════════════════════════
@@ -393,13 +415,16 @@ def _recall_fts_ids(
     include_archived: bool, include_statuses: Optional[list[str]],
 ) -> list[str]:
     """FTS5 全文搜索，只返回 ID 列表（用于 RRF 融合）"""
+    sanitized = re.sub(r'[^\w一-鿿\s]', ' ', (query or ""))
+    if not sanitized.strip():
+        return []
     with get_conn() as conn:
         sql = """
             SELECT m.id FROM memories m
             JOIN memories_fts f ON m.id = f.id
             WHERE memories_fts MATCH ? AND m.private = ?
         """
-        params: list = [query, int(private)]
+        params: list = [sanitized, int(private)]
         if not include_archived:
             sql += " AND m.archived = 0 AND COALESCE(m.status, 'active') IN ('active', 'pinned')"
         elif include_statuses:
@@ -411,32 +436,6 @@ def _recall_fts_ids(
         rows = conn.execute(sql, params).fetchall()
         return [r["id"] for r in rows]
 
-
-def _recall_fts(
-    query: str, limit: int, private: bool,
-    include_archived: bool, include_content: bool, include_statuses: Optional[list[str]],
-) -> list[dict]:
-    """FTS5 全文搜索降级"""
-    with get_conn() as conn:
-        sql = """
-            SELECT m.* FROM memories m
-            JOIN memories_fts f ON m.id = f.id
-            WHERE memories_fts MATCH ? AND m.private = ?
-        """
-        params: list = [query, int(private)]
-        if not include_archived:
-            sql += " AND m.archived = 0 AND COALESCE(m.status, 'active') IN ('active', 'pinned')"
-        elif include_statuses:
-            placeholders_status = ",".join("?" for _ in include_statuses)
-            sql += f" AND COALESCE(m.status, 'active') IN ({placeholders_status})"
-            params.extend(include_statuses)
-        sql += " LIMIT ?"
-        params.append(limit)
-
-        rows = conn.execute(sql, params).fetchall()
-        for row in rows:
-            _touch_recall(conn, row["id"])
-        return [_row_to_dict(r, include_content) for r in rows]
 
 
 def _recall_recent(
@@ -451,11 +450,14 @@ def _recall_recent(
         if include_statuses:
             placeholders_status = ",".join("?" for _ in include_statuses)
             sql = f"""SELECT * FROM memories
-                      WHERE private = ? AND COALESCE(status, 'active') IN ({placeholders_status})"""
+                      WHERE private = ? AND archived = 0
+                      AND COALESCE(status, 'active') IN ({placeholders_status})"""
             params.extend(include_statuses)
         sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         rows = conn.execute(sql, params).fetchall()
+        for row in rows:
+            _touch_recall(conn, row["id"])
         return [_row_to_dict(r, include_content) for r in rows]
 
 

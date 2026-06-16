@@ -38,25 +38,6 @@ from memoria.core import (
 )
 
 
-INTERPRETATION_MARKERS = (
-    "信任", "关系更近", "更亲近", "依赖", "亲密", "情绪状态",
-    "trust", "closer", "relationship", "depends on", "intimacy",
-)
-
-
-def fact_boundary_warnings(content: str) -> list[str]:
-    text = (content or "").lower()
-    if not text:
-        return []
-    if any(marker.lower() in text for marker in INTERPRETATION_MARKERS):
-        return [
-            "This content may describe an interpretation rather than an observable fact. "
-            "Memoria should store observed facts; current position or relationship interpretation "
-            "belongs in Continuity."
-        ]
-    return []
-
-
 def cmd_store(args):
     content = args.content
     if content == "-":
@@ -79,9 +60,6 @@ def cmd_store(args):
         source_agent=args.source_agent,
         source_run_id=args.source_run_id,
     )
-    warnings = fact_boundary_warnings(content)
-    if warnings:
-        result["warnings"] = warnings
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

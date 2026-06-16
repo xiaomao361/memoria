@@ -106,50 +106,6 @@ conda run -n zhouwei python3 cli.py recall \
 conda run -n zhouwei python3 cli.py recall \
   --limit 20 --include-statuses "active,pinned"
 
-# Agent 输出先写入候选区
-conda run -n zhouwei python3 cli.py candidate add \
-  --content "模型生成的候选记忆" \
-  --tags "memoria,agent" \
-  --source-agent hermes \
-  --kind idea \
-  --authority model_generated
-
-# 查看待审核候选
-conda run -n zhouwei python3 cli.py candidate list
-
-# 审核通过并提升为 durable memory
-conda run -n zhouwei python3 cli.py candidate accept <candidate_id> \
-  --reviewed-by codex \
-  --review-note "内容可保留"
-
-# 拒绝或丢弃候选
-conda run -n zhouwei python3 cli.py candidate reject <candidate_id> \
-  --reviewed-by codex \
-  --discard
-
-# 注册本机 agent 及其 trust policy
-conda run -n zhouwei python3 cli.py agent add hermes \
-  --name "Hermes" \
-  --trust-level trusted_writer \
-  --can-write-durable
-
-conda run -n zhouwei python3 cli.py agent add codex \
-  --name "Codex" \
-  --trust-level trusted_writer \
-  --can-write-durable
-
-# 通过 agent-aware 入口写入，系统会按 trust policy 自动路由
-# trusted_writer durable 默认 authority=confirmed/confidence=1.0；
-# candidate_only 或不确定内容仍进入候选流，默认 authority=model_generated/confidence=0.7。
-conda run -n zhouwei python3 cli.py agent-store \
-  --agent-id hermes \
-  --content "已确认的 Hermes 运行状态"
-
-# 通过 agent-aware 入口召回；只有显式请求且 agent 有权限时才会读私密区
-conda run -n zhouwei python3 cli.py agent-recall \
-  --agent-id codex \
-  --query "最近的项目决策"
-
 # 旧数据元数据回填：建议先 dry-run，再按公开区小批量应用
 conda run -n zhouwei python3 cli.py maintain classify-metadata \
   --dry-run --public-only --limit 50
@@ -296,9 +252,6 @@ conda run -n zhouwei python3 server/app.py --port 8000
 
 功能：
 - 概览 / 语义搜索 / 记忆图谱 / 标签云 / 全部记忆
-- 结构化上下文：调用 `recall_context()`，按硬约束 / 当前状态 / 既有决策 / 参考资料展示 context pack
-- 候选区：查看待审核候选，支持接收 / 驳回 / 丢弃，支持手工补录候选
-- 代理：查看与注册 agents，管理信任级别、受限读取、正式写入能力
 - 受限内容：单独确认后加载受限记忆
 
 ---

@@ -517,18 +517,6 @@ body::before {
   letter-spacing: 0.08em;
   font-weight: 600;
 }
-.status-pending { color: var(--orange); background: var(--orange-dim); }
-.status-accepted,
-.status-edited,
-.status-merged,
-.status-active,
-.status-trusted_writer { color: var(--green); background: var(--green-dim); }
-.status-rejected,
-.status-discarded,
-.status-read_only { color: var(--red); background: var(--red-dim); }
-.status-candidate_only,
-.status-private_allowed,
-.status-archived { color: var(--purple); background: var(--purple-dim); }
 .card-actions {
   display: flex;
   flex-wrap: wrap;
@@ -827,14 +815,6 @@ body::before {
 const API = '';
 let currentView = 'dashboard';
 let privateUnlocked = false;
-const CONTEXT_GROUPS = [
-  ['hard_constraints', '硬约束', 'context-hard-count'],
-  ['current_state', '当前状态', 'context-current-count'],
-  ['prior_decisions', '既有决策', 'context-decision-count'],
-  ['references', '参考资料', 'context-reference-count'],
-  ['background', '背景信息', null],
-  ['forbidden_directions', '禁止方向', null],
-];
 
 document.querySelectorAll('.nav-item').forEach(el => {
   el.addEventListener('click', () => {
@@ -850,9 +830,6 @@ function showView(view) {
   document.getElementById('view-' + view).classList.remove('hidden');
   if (view === 'dashboard') loadDashboard();
   else if (view === 'search') document.getElementById('search-input').focus();
-  else if (view === 'context') document.getElementById('context-query').focus();
-  else if (view === 'candidates') loadCandidates();
-  else if (view === 'agents') loadAgents();
   else if (view === 'graph') loadGraph(false);
   else if (view === 'labels') loadLabels();
   else if (view === 'recent') loadRecent();
@@ -1000,157 +977,6 @@ function renderList(memories) {
   `).join('');
 }
 
-function renderCandidateList(candidates) {
-  if (!candidates || !candidates.length) return '<div class="empty-state">暂无候选记忆</div>';
-  return candidates.map(c => `
-    <div class="table-card">
-      <div class="table-head">
-        <div class="table-title">${escapeHtml((c.summary || c.content || '').slice(0, 140))}</div>
-        <span class="status-chip status-${escapeHtml(c.status || 'pending')}">${escapeHtml(formatCandidateStatus(c.status || 'pending'))}</span>
-      </div>
-      <div class="meta-row">
-        ${renderMetaChip(c.source_agent || '未标注来源')}
-        ${renderMetaChip(formatKind(c.proposed_kind || c.kind || 'fact'))}
-        ${renderMetaChip(formatRole(c.proposed_retrieval_role || c.retrieval_role || 'background'))}
-        ${renderMetaChip(c.private ? '受限内容' : '公开内容')}
-      </div>
-      ${(c.tags && c.tags.length) ? `<div class="tag-row">${c.tags.map(t => `<span class="tag tag-default">${escapeHtml(t)}</span>`).join('')}</div>` : ''}
-      <div class="card-actions">
-        ${c.status === 'pending' ? `<button class="btn btn-success" onclick="acceptCandidate('${c.id}')">接收</button>` : ''}
-        ${c.status === 'pending' ? `<button class="btn" onclick="rejectCandidate('${c.id}', false)">驳回</button>` : ''}
-        ${c.status === 'pending' ? `<button class="btn btn-danger" onclick="rejectCandidate('${c.id}', true)">丢弃</button>` : ''}
-      </div>
-    </div>
-  `).join('');
-}
-
-function renderAgentList(agents) {
-  if (!agents || !agents.length) return '<div class="empty-state">暂无 agent</div>';
-  return agents.map(agent => `
-    <div class="table-card">
-      <div class="table-head">
-        <div>
-          <div class="table-title">${escapeHtml(agent.name || agent.id)}</div>
-          <div class="muted-copy">${escapeHtml(agent.id)}</div>
-        </div>
-        <span class="status-chip status-${escapeHtml(agent.trust_level || 'trusted_writer')}">${escapeHtml(formatTrustLevel(agent.trust_level || 'trusted_writer'))}</span>
-      </div>
-      <div class="meta-row">
-        ${renderMetaChip(agent.can_read_private ? '可读受限内容' : '仅公开内容')}
-        ${renderMetaChip(agent.can_write_durable ? '可写正式记忆' : '候选区路由')}
-      </div>
-      ${agent.description ? `<div class="muted-copy">${escapeHtml(agent.description)}</div>` : ''}
-    </div>
-  `).join('');
-}
-
-function renderContextPack(pack) {
-  let html = '';
-  for (const [key, label, counterId] of CONTEXT_GROUPS) {
-    const items = pack[key] || [];
-    if (counterId) document.getElementById(counterId).textContent = String(items.length);
-    if (!items.length) continue;
-    html += `
-      <div class="context-group">
-        <h4>${label}</h4>
-        ${items.map(item => `
-          <div class="context-item">
-            <div class="table-title">${escapeHtml(item.summary || item.content || '')}</div>
-            <div class="meta-row">
-              ${renderMetaChip(formatKind(item.kind || 'fact'))}
-              ${renderMetaChip(formatRole(item.retrieval_role || 'background'))}
-              ${renderMetaChip(formatAuthority(item.authority || 'confirmed'))}
-            </div>
-            ${item.reason ? `<div class="muted-copy">${escapeHtml(item.reason)}</div>` : ''}
-            ${typeof item.score === 'number' ? `<div class="context-score">score ${item.score.toFixed(3)}</div>` : ''}
-          </div>
-        `).join('')}
-      </div>
-    `;
-  }
-  if (!html) {
-    resetContextCounters();
-    return '<div class="empty-state">没有召回到可分组的上下文</div>';
-  }
-  return html;
-}
-
-function renderMetaChip(text) {
-  return `<span class="meta-chip">${escapeHtml(text)}</span>`;
-}
-
-function formatCandidateStatus(status) {
-  const mapping = {
-    pending: '待审核',
-    accepted: '已接收',
-    edited: '已编辑接收',
-    merged: '已合并接收',
-    rejected: '已驳回',
-    discarded: '已丢弃',
-  };
-  return mapping[status] || status;
-}
-
-function formatTrustLevel(level) {
-  const mapping = {
-    candidate_only: '仅候选',
-    trusted_writer: '可信写入',
-    private_allowed: '可读受限',
-    read_only: '只读',
-  };
-  return mapping[level] || level;
-}
-
-function formatKind(kind) {
-  const mapping = {
-    fact: '事实',
-    decision: '决策',
-    project_state: '项目状态',
-    technical_note: '技术记录',
-    todo: '待办',
-    event: '事件',
-    agent_observation: '代理观察',
-  };
-  return mapping[kind] || kind;
-}
-
-function formatRole(role) {
-  const mapping = {
-    background: '背景',
-    current_state: '现状',
-    prior_decisions: '既有决策',
-    references: '参考',
-    reference: '参考',
-    hard_constraints: '硬约束',
-    forbidden_directions: '禁止方向',
-  };
-  return mapping[role] || role;
-}
-
-function formatAuthority(authority) {
-  const mapping = {
-    confirmed: '已确认',
-    model_generated: '模型生成',
-    inferred: '推断',
-    reported: '转述',
-  };
-  return mapping[authority] || authority;
-}
-
-function splitCsv(value) {
-  const items = (value || '').split(',').map(x => x.trim()).filter(Boolean);
-  return items.length ? items : null;
-}
-
-function resetContextCounters() {
-  CONTEXT_GROUPS.forEach(([, , counterId]) => {
-    if (counterId) document.getElementById(counterId).textContent = '0';
-  });
-}
-
-function renderErrorState(error) {
-  return `<div class="empty-state">请求失败：${escapeHtml(error.message || 'unknown error')}</div>`;
-}
 
 function escapeHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');

@@ -320,10 +320,6 @@ def audit_quality(
                   AND COALESCE(status, 'active') IN ('active', 'pinned')
                   {scope_sql}"""
         ).fetchone()[0]
-        pending_candidates = conn.execute(
-            "SELECT count(*) FROM memory_candidates WHERE status = 'pending'"
-        ).fetchone()[0]
-
         issues = {
             "empty_summary": _sample_rows(conn, "COALESCE(summary, '') = ''"),
             "short_summary": _sample_rows(
@@ -351,10 +347,6 @@ def audit_quality(
             ),
         }
 
-        agent_rows = conn.execute(
-            """SELECT id, name, trust_level, can_write_durable, can_read_private
-               FROM agents ORDER BY id"""
-        ).fetchall()
         recent_writer_rows = conn.execute(
             f"""SELECT id, summary, source, source_agent, kind, authority,
                        retrieval_role, status, private, created_at
@@ -403,12 +395,7 @@ def audit_quality(
             },
         }
 
-    non_trusted_agents = [
-        _agent_quality_sample(row)
-        for row in agent_rows
-        if row["trust_level"] != "trusted_writer" or not row["can_write_durable"]
-    ]
-    recommendations = _quality_recommendations(issues, review, pending_candidates, non_trusted_agents)
+    recommendations = _quality_recommendations(issues, review)
 
     return {
         "dry_run": True,
@@ -420,12 +407,6 @@ def audit_quality(
         "totals": {
             "memories": total,
             "active": active,
-            "pending_candidates": pending_candidates,
-            "agents": len(agent_rows),
-        },
-        "agents": {
-            "non_trusted_or_non_durable": non_trusted_agents,
-            "all": [_agent_quality_sample(row) for row in agent_rows],
         },
         "source_agent_counts": [
             {"source_agent": row["source_agent"], "count": row["count"]}
@@ -455,21 +436,9 @@ def _memory_quality_sample(row) -> dict:
     }
 
 
-def _agent_quality_sample(row) -> dict:
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "trust_level": row["trust_level"],
-        "can_write_durable": bool(row["can_write_durable"]),
-        "can_read_private": bool(row["can_read_private"]),
-    }
-
-
 def _quality_recommendations(
     issues: dict,
     review: dict,
-    pending_candidates: int,
-    non_trusted_agents: list[dict],
 ) -> list[str]:
     recommendations = []
     if issues["empty_summary"]["count"]:
@@ -479,17 +448,13 @@ def _quality_recommendations(
     if issues["missing_source_agent_for_agent_like_source"]["count"]:
         recommendations.append("Backfill source_agent for agent-like writes where provenance is clear.")
     if issues["model_generated_durable"]["count"]:
-        recommendations.append("Review durable model_generated memories and either confirm or move them to candidate flow.")
-    if pending_candidates:
-        recommendations.append("Review pending candidates before nightly maintenance accumulates more queue items.")
-    if non_trusted_agents:
-        recommendations.append("Align local device agents to trusted_writer if they should follow the current policy.")
+        recommendations.append("Review durable model_generated memories and either confirm or mark them appropriately.")
     if review["merge_candidates"]["count"]:
         recommendations.append("Review merge candidates and merge only after semantic confirmation.")
     if review["conflict_candidates"]["count"]:
         recommendations.append("Review conflict candidates and mark stale/superseded memories explicitly.")
     if not recommendations:
-        recommendations.append("No immediate quality repair is required; continue using recall-context on real handoffs.")
+        recommendations.append("No immediate quality repair is required.")
     return recommendations
 
 
