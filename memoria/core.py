@@ -322,7 +322,7 @@ def recall(
     if query:
         return _recall_by_query(query, limit, private, include_archived, include_content, include_statuses)
 
-    return _recall_recent(limit, offset, private, include_content, include_statuses)
+    return _recall_recent(limit, offset, private, include_archived, include_content, include_statuses)
 
 
 def _recall_by_id(memory_id: str, include_content: bool) -> list[dict]:
@@ -415,7 +415,7 @@ def _recall_fts_ids(
     include_archived: bool, include_statuses: Optional[list[str]],
 ) -> list[str]:
     """FTS5 全文搜索，只返回 ID 列表（用于 RRF 融合）"""
-    sanitized = re.sub(r'[^\w一-鿿\s]', ' ', (query or ""))
+    sanitized = re.sub(r'[^\w一-鿿㐀-䶿\s]', ' ', (query or ""))
     if not sanitized.strip():
         return []
     with get_conn() as conn:
@@ -424,7 +424,7 @@ def _recall_fts_ids(
             JOIN memories_fts f ON m.id = f.id
             WHERE memories_fts MATCH ? AND m.private = ?
         """
-        params: list = [sanitized, int(private)]
+        params: list = [sanitized.strip(), int(private)]
         if not include_archived:
             sql += " AND m.archived = 0 AND COALESCE(m.status, 'active') IN ('active', 'pinned')"
         elif include_statuses:
@@ -439,19 +439,18 @@ def _recall_fts_ids(
 
 
 def _recall_recent(
-    limit: int, offset: int, private: bool, include_content: bool,
-    include_statuses: Optional[list[str]],
+    limit: int, offset: int, private: bool, include_archived: bool,
+    include_content: bool, include_statuses: Optional[list[str]],
 ) -> list[dict]:
     with get_conn() as conn:
         sql = """SELECT * FROM memories
-                 WHERE private = ? AND archived = 0
-                 AND COALESCE(status, 'active') IN ('active', 'pinned')"""
+                 WHERE private = ?"""
         params: list = [int(private)]
-        if include_statuses:
+        if not include_archived:
+            sql += " AND archived = 0 AND COALESCE(status, 'active') IN ('active', 'pinned')"
+        elif include_statuses:
             placeholders_status = ",".join("?" for _ in include_statuses)
-            sql = f"""SELECT * FROM memories
-                      WHERE private = ? AND archived = 0
-                      AND COALESCE(status, 'active') IN ({placeholders_status})"""
+            sql += f" AND COALESCE(status, 'active') IN ({placeholders_status})"
             params.extend(include_statuses)
         sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])

@@ -11,7 +11,7 @@ Memoria CLI - AI Agent 通用记忆系统
     # 检索
     memoria recall --query "关键词"
     memoria recall --tags "项目,kraken"
-    memoria recall --recent 10
+    memoria recall --limit 20
     memoria recall --id "uuid"
 
     # 管理
