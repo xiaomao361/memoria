@@ -1,5 +1,10 @@
 # Memoria Shared Agent Memory Implementation Plan
 
+> ⚠️ **历史文档** (2026-05-28)。本文描述的 candidate 审核流、agent trust policy、
+> recall-context 结构化上下文已于 v6.9.1 (2026-06-16) 移除。
+> 保留此文档仅作设计决策记录，不代表当前可用功能。
+> 当前功能请参考 README.md 和 SKILL.md。
+
 Date: 2026-05-28
 
 ## Goal

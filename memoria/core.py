@@ -414,26 +414,60 @@ def _recall_fts_ids(
     query: str, limit: int, private: bool,
     include_archived: bool, include_statuses: Optional[list[str]],
 ) -> list[str]:
-    """FTS5 全文搜索，只返回 ID 列表（用于 RRF 融合）"""
+    """FTS5 全文搜索，只返回 ID 列表（用于 RRF 融合）。
+    FTS5 无结果时用 LIKE 兜底，避免 CJK 短词 token 化边界导致漏结果。
+    """
     sanitized = re.sub(r'[^\w一-鿿㐀-䶿\s]', ' ', (query or ""))
-    if not sanitized.strip():
+    sanitized = sanitized.strip()
+    if not sanitized:
         return []
+
     with get_conn() as conn:
-        sql = """
+        # 1. FTS5 主搜索
+        fts_sql = """
             SELECT m.id FROM memories m
             JOIN memories_fts f ON m.id = f.id
             WHERE memories_fts MATCH ? AND m.private = ?
         """
-        params: list = [sanitized.strip(), int(private)]
+        params: list = [sanitized, int(private)]
         if not include_archived:
-            sql += " AND m.archived = 0 AND COALESCE(m.status, 'active') IN ('active', 'pinned')"
+            fts_sql += " AND m.archived = 0 AND COALESCE(m.status, 'active') IN ('active', 'pinned')"
         elif include_statuses:
             placeholders_status = ",".join("?" for _ in include_statuses)
-            sql += f" AND COALESCE(m.status, 'active') IN ({placeholders_status})"
+            fts_sql += f" AND COALESCE(m.status, 'active') IN ({placeholders_status})"
             params.extend(include_statuses)
-        sql += " LIMIT ?"
+        fts_sql += " LIMIT ?"
         params.append(limit)
-        rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(fts_sql, params).fetchall()
+        ids = [r["id"] for r in rows]
+
+    # 2. FTS5 无结果 → LIKE 兜底（CJK 单字 token 化时 FTS5 可能漏匹配）
+    if not ids:
+        ids = _fallback_like_ids(sanitized, limit, private, include_archived, include_statuses)
+
+    return ids
+
+
+def _fallback_like_ids(
+    query: str, limit: int, private: bool,
+    include_archived: bool, include_statuses: Optional[list[str]],
+) -> list[str]:
+    with get_conn() as conn:
+        like_sql = """
+            SELECT m.id FROM memories m
+            WHERE (m.summary LIKE ? OR m.content LIKE ?) AND m.private = ?
+        """
+        like_pattern = f"%{query}%"
+        params: list = [like_pattern, like_pattern, int(private)]
+        if not include_archived:
+            like_sql += " AND m.archived = 0 AND COALESCE(m.status, 'active') IN ('active', 'pinned')"
+        elif include_statuses:
+            placeholders_status = ",".join("?" for _ in include_statuses)
+            like_sql += f" AND COALESCE(m.status, 'active') IN ({placeholders_status})"
+            params.extend(include_statuses)
+        like_sql += " ORDER BY m.created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(like_sql, params).fetchall()
         return [r["id"] for r in rows]
 
 
