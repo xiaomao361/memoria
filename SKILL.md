@@ -1,7 +1,7 @@
 ---
 name: memoria
 description: |
-  AI Agent 通用记忆系统 v6.9.1。跨会话记忆持久化与智能召回。
+  AI Agent 通用记忆系统 v6.10.0。跨会话记忆持久化与智能召回。BM25 多信号检索 + MCP 常驻进程。
   当用户提到"记住"、"这个重要"、"之前说过"、"你还记得吗"，
   或需要持久化跨会话信息时使用。
 metadata:
@@ -256,6 +256,16 @@ conda run -n zhouwei python3 server/app.py --port 8000
 
 ---
 
+## MCP 常驻进程
+
+```bash
+conda run -n zhouwei python3 server/mcp.py
+```
+
+给 Claude Code 等 MCP 客户端挂载时使用。工具包括写入、检索、读取详情、删除、恢复、标签管理、统计和标签列表。
+
+---
+
 ## 查询优先级
 
 | 场景 | 方法 |
@@ -277,5 +287,6 @@ vectors/    →  ChromaDB + Ollama bge-m3（语义检索，可重建）
 
 - 写入：文件 → SQLite → 向量，三步独立
 - 索引损坏时 `maintain rebuild` 从文件重建
-- 所有操作通过 `cli.py` 统一入口
+- 日常命令通过 `cli.py` 入口
 - Web 管理通过 `server/app.py` 提供 REST API + 前端
+- MCP 常驻进程通过 `server/mcp.py` 提供 stdio 工具

@@ -1,17 +1,18 @@
-# Memoria v6.9.1 — AI Agent 通用记忆系统
+# Memoria v6.10.0 — AI Agent 通用记忆系统
 
 > 跨会话记忆持久化。SQLite + 向量语义检索 + Markdown 文件存储。
 
 ## 简介
 
-Memoria 是一个为 AI Agent 设计的通用记忆系统。任何 agent 都可以通过 CLI 或 HTTP API 读写记忆。
+Memoria 是一个为 AI Agent 设计的通用记忆系统。任何 agent 都可以通过 CLI、HTTP API 或 MCP 常驻进程读写记忆。
 
 - **语义检索** — Ollama bge-m3 向量搜索，自然语言查询
 - **全文搜索** — SQLite FTS5 降级搜索
 - **关系索引** — 标签 + `[[双向链接]]` 统一为 labels
 - **共享记忆元数据** — kind / authority / retrieval_role / confidence / lifecycle status / agent provenance
-- **RRF 混合检索** — 向量语义 + FTS5 全文并行搜索，Reciprocal Rank Fusion 融合排序
+- **BM25 多信号检索** — 向量语义 + FTS5 BM25 + 标签实体匹配，加权融合排序
 - **Web 管理** — 中文控制台 + 语义搜索 / 标签过滤 / 力导向图谱
+- **MCP 常驻进程** — 给 Claude Code 等 MCP 客户端挂载，复用同一套 core API
 - **可重建** — 所有索引从 store/*.md 文件重建
 
 ## 与 Continuity 的边界
@@ -60,6 +61,7 @@ memoria/                      # Python 包
 └── maintain.py               # 维护任务
 server/
 ├── app.py                    # FastAPI Web 服务
+├── mcp.py                    # MCP stdio 常驻进程
 └── static/index.html         # 前端
 cli.py                        # CLI 入口
 ```
@@ -75,6 +77,7 @@ cli.py                        # CLI 入口
 | 向量 | ChromaDB 1.5.9 |
 | Embedding | Ollama bge-m3 (1024 维, 本地) |
 | Web | FastAPI + uvicorn |
+| MCP | mcp Python package, stdio transport |
 | 文件格式 | Markdown + YAML front matter |
 
 ---
@@ -93,7 +96,7 @@ store(content, tags, source, private)
 ### 检索
 
 ```
-recall(query)     → RRF 混合检索（向量 + FTS 并行，RRF 融合 + importance 加权）
+recall(query)     → BM25 多信号检索（向量 + FTS5 BM25 + 标签实体匹配 + importance 加权）
 recall(tags)      → SQLite JOIN labels 精确匹配
 recall(id)        → SQLite 直接定位
 recall(limit=N)   → SQLite ORDER BY created_at DESC
@@ -127,6 +130,7 @@ maintain dormant       → >30天未召回 → archived=1
 
 - **Ollama**: `bge-m3` 模型（embedding）
 - **Python 包**: chromadb, fastapi, uvicorn, requests, pydantic
+- **MCP 包**: `pip install -r requirements-mcp.txt`
 
 ---
 
@@ -140,11 +144,33 @@ conda run -n zhouwei python3 server/app.py --port 8000
 浏览器访问 `http://localhost:8000`，功能：
 
 - **概览** — 统计卡片 + 最近记忆
-- **搜索** — 语义搜索（bge-m3 RRF 混合检索）
+- **搜索** — 语义搜索（向量 + FTS5 BM25 + 标签实体匹配）
 - **图谱** — 力导向关系图（拖拽/缩放/双击跳转）
 - **标签** — 所有标签云（点击过滤）
 - **全部** — 全部记忆列表
 - **受限内容** — 单独确认后加载受限记忆
+
+## MCP 常驻进程
+
+启动：
+```bash
+conda run -n zhouwei python3 server/mcp.py
+```
+
+Claude Code 配置示例：
+
+```json
+{
+  "mcpServers": {
+    "memoria": {
+      "command": "conda",
+      "args": ["run", "-n", "zhouwei", "python3", "/Users/zhouwei/Documents/ClaraCore/skills/memoria/server/mcp.py"]
+    }
+  }
+}
+```
+
+MCP 工具复用 `core.py`，包括写入、检索、读取详情、删除、恢复、标签管理、统计和标签列表。
 
 ---
 
@@ -158,6 +184,7 @@ conda run -n zhouwei python3 server/app.py --port 8000
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v6.10.0 | 2026-06-16 | BM25 多信号检索（向量 + FTS5 BM25 + 标签实体匹配）；新增 MCP stdio 常驻进程；修复查询翻页候选不足问题 |
 | v6.9.1 | 2026-06-16 | RRF 混合检索（向量+FTS 并行 → RRF 融合 + importance 加权）；事实边界检查内置到 store()；移除 candidate/agent/recall-context；删除 adapters/、migrate.py；前端精简 |
 | v6.9 | 2026-06-01 | 标签别名系统、候选记忆审核流、Agent trust policy、状态生命周期完善；Web 控制台全面中文化 |
 | v6.8 | 2026-05-29 | Web 管理台升级为共享记忆控制台：新增结构化上下文、候选区审核、代理策略视图，并完成中文化文案收口 |

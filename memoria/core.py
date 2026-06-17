@@ -371,10 +371,12 @@ def _recall_by_query(
     query: str, limit: int, offset: int, private: bool,
     include_archived: bool, include_content: bool, include_statuses: Optional[list[str]],
 ) -> list[dict]:
+    candidate_limit = max(limit + offset, limit, 1) * 2
+
     # 1. 三信号并行搜索
-    vec_results = search_vectors(query, limit=limit * 2, private=private)
-    fts_scored = _recall_fts_scored(query, limit * 2, private, include_archived, include_statuses)
-    entity_scored = _entity_match_scored(query, limit * 2, private, include_archived, include_statuses)
+    vec_results = search_vectors(query, limit=candidate_limit, private=private)
+    fts_scored = _recall_fts_scored(query, candidate_limit, private, include_archived, include_statuses)
+    entity_scored = _entity_match_scored(query, candidate_limit, private, include_archived, include_statuses)
 
     # 2. 各信号归一化到 [0, 1]
     vec_scores = _normalize_scores(vec_results, key="score")
@@ -413,10 +415,15 @@ def _recall_by_query(
             # 融合分 * 0.8 + importance * 0.2
             d["score"] = scores.get(row["id"], 0) * 0.8 + row["importance"] * 0.2
             results.append(d)
-            _touch_recall(conn, row["id"])
 
     results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    return results[offset:offset + limit]
+    page = results[offset:offset + limit]
+
+    with get_conn() as conn:
+        for row in page:
+            _touch_recall(conn, row["id"])
+
+    return page
 
 
 def _normalize_scores(scored: list[dict], key: str = "score") -> dict[str, float]:

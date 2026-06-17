@@ -1,7 +1,7 @@
-# Memoria v6.9.1 架构设计文档
+# Memoria v6.10.0 架构设计文档
 
-> 适用版本: v6.9.1
-> 最后更新: 2026-06-16
+> 适用版本: v6.10.0
+> 最后更新: 2026-06-17
 
 ---
 
@@ -123,20 +123,21 @@ core.store(content, tags, source, private)
 
 ---
 
-## 3. 检索流程
+## 4. 检索流程
 
 ```
 core.recall(query, tags, memory_id, limit, private)
     │
     ├─ memory_id → SQLite 直接定位
     ├─ tags      → SQLite JOIN labels
-    ├─ query     → 向量语义 + FTS5 全文并行搜索
-    │              → RRF (Reciprocal Rank Fusion) 融合排序
-    │              → importance 加权 (0.8 RRF + 0.2 importance)
+    ├─ query     → 向量语义 + FTS5 BM25 + 标签实体匹配
+    │              → 三信号加权融合排序
+    │              → importance 加权 (0.8 检索分 + 0.2 importance)
     └─ (无参数)  → SQLite ORDER BY created_at DESC
 ```
 
 每次召回自动更新 `last_recalled_at` 和 `recall_count`。
+查询翻页会按 `limit + offset` 取足候选，再只更新当前页实际返回记录的召回计数。
 
 ---
 
@@ -175,12 +176,35 @@ cli.py maintain audit-quality --public-only --limit 20
 当前 Web 界面覆盖以下工作流：
 
 - 概览 / 搜索 / 图谱 / 标签 / 全部记忆
-- 搜索基于 RRF 混合检索（向量 + FTS 并行，RRF 融合 + importance 加权）
+- 搜索基于 BM25 多信号检索（向量 + FTS5 BM25 + 标签实体匹配 + importance 加权）
 - 受限内容：单独确认后查看受限记忆
 
 ---
 
-## 7. Web API
+## 8. MCP 常驻进程
+
+`server/mcp.py` 提供 stdio transport，可被 Claude Code 等 MCP 客户端挂载。
+
+启动：
+
+```bash
+conda run -n zhouwei python3 server/mcp.py
+```
+
+MCP 层只做协议包装，不重写业务逻辑；所有工具都复用 `core.py`：
+
+- `memoria_store`
+- `memoria_recall`
+- `memoria_get`
+- `memoria_delete`
+- `memoria_restore`
+- `memoria_tag`
+- `memoria_stats`
+- `memoria_labels`
+
+---
+
+## 9. Web API
 
 FastAPI 服务，端口默认 8000：
 
@@ -210,14 +234,14 @@ conda run -n zhouwei python3 server/app.py --port 8000
 | 视图 | 功能 |
 |------|------|
 | 概览 | 统计卡片 + 最近记忆列表 |
-| 搜索 | 语义搜索（bge-m3 向量匹配） |
+| 搜索 | 语义搜索（向量 + FTS5 BM25 + 标签实体匹配） |
 | 图谱 | 力导向关系图可视化（Canvas 绘制，支持拖拽/缩放/双击跳转） |
 | 标签 | 标签云，点击过滤 |
 | 全部 | 全部记忆列表 |
 
 ---
 
-## 8. 配置
+## 10. 配置
 
 集中在 `memoria/config.py`：
 
@@ -234,7 +258,7 @@ conda run -n zhouwei python3 server/app.py --port 8000
 
 ---
 
-## 9. 目录结构
+## 11. 目录结构
 
 ```
 ./
@@ -251,6 +275,7 @@ conda run -n zhouwei python3 server/app.py --port 8000
 │   └── maintain.py           # 维护任务
 ├── server/
 │   ├── app.py                # FastAPI REST API
+│   ├── mcp.py                # MCP stdio 常驻进程
 │   └── static/index.html     # 中文前端（概览/搜索/图谱/标签/列表）
 ├── cli.py                    # CLI 入口
 ```
