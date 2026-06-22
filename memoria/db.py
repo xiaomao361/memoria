@@ -49,6 +49,33 @@ CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_private ON memories(private);
 CREATE INDEX IF NOT EXISTS idx_memories_archived ON memories(archived);
+
+CREATE TABLE IF NOT EXISTS records (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    record_type TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    local_date TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    note TEXT,
+    source TEXT DEFAULT 'manual',
+    source_agent TEXT,
+    source_run_id TEXT,
+    dedupe_key TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_records_user_type_occurred
+ON records(user_id, record_type, occurred_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_records_user_local_date
+ON records(user_id, local_date);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_records_dedupe
+ON records(user_id, record_type, dedupe_key)
+WHERE dedupe_key IS NOT NULL;
 """
 
 MIGRATIONS = [

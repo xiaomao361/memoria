@@ -1,7 +1,7 @@
 ---
 name: memoria
 description: |
-  AI Agent 通用记忆系统 v6.10.0。跨会话记忆持久化与智能召回。BM25 多信号检索 + MCP 常驻进程。
+  AI Agent 通用记忆系统 v6.11.0。跨会话记忆持久化、智能召回和高频时序流水。BM25 多信号检索 + MCP 常驻进程。
   当用户提到"记住"、"这个重要"、"之前说过"、"你还记得吗"，
   或需要持久化跨会话信息时使用。
 metadata:
@@ -35,6 +35,8 @@ conda run -n zhouwei python3 cli.py <command>
 
 Memoria 只保存可观察事实。不要把“用户信任 Agent”“关系更近”“用户依赖 Agent”
 这类解释当成事实写入；这类当前接续位置应该放在 Continuity。
+
+每天的锻炼、饮食、睡眠等高频数据不要逐条写入长期记忆，应使用流水记录入口。
 
 ```bash
 # 基本写入
@@ -118,6 +120,37 @@ conda run -n zhouwei python3 cli.py maintain audit-quality \
 conda run -n zhouwei python3 cli.py maintain backfill-source-agent \
   --dry-run --include-private --limit 0
 ```
+
+---
+
+## 流水记录
+
+第一版完整支持 `fitness`。流水独立于长期记忆，不参与语义召回、重要性判断和记忆整理。
+
+```bash
+# 新增
+conda run -n zhouwei python cli.py record add \
+  --user-id zhouwei \
+  --type fitness \
+  --occurred-at 2026-06-21T20:00:00+08:00 \
+  --data '{"activity":"步行","steps":16000,"duration_minutes":90}' \
+  --dedupe-key fitness-zhouwei-2026-06-21
+
+# 查询
+conda run -n zhouwei python cli.py record query \
+  --user-id zhouwei --type fitness \
+  --from 2026-06-01T00:00:00+08:00 \
+  --to 2026-07-01T00:00:00+08:00
+
+# 汇总
+conda run -n zhouwei python cli.py record summary \
+  --user-id zhouwei --type fitness \
+  --from 2026-06-01T00:00:00+08:00 \
+  --to 2026-07-01T00:00:00+08:00
+```
+
+`fitness` v1 可用字段：`activity`、`steps`、`duration_minutes`、`distance_km`、
+`repetitions`、`sets`、`completed`。时间必须带时区，`data` 必须是对象。
 
 ---
 
@@ -280,8 +313,8 @@ conda run -n zhouwei python3 server/mcp.py
 ## 架构简述
 
 ```
-store/*.md  →  唯一真实来源（人类可读 Markdown）
-memoria.db  →  SQLite（元数据 + 关系 + FTS5 全文搜索）
+store/*.md  →  长期记忆的唯一真实来源（人类可读 Markdown）
+memoria.db  →  SQLite（记忆索引 + 独立流水记录）
 vectors/    →  ChromaDB + Ollama bge-m3（语义检索，可重建）
 ```
 
@@ -290,3 +323,4 @@ vectors/    →  ChromaDB + Ollama bge-m3（语义检索，可重建）
 - 日常命令通过 `cli.py` 入口
 - Web 管理通过 `server/app.py` 提供 REST API + 前端
 - MCP 常驻进程通过 `server/mcp.py` 提供 stdio 工具
+- 流水以 SQLite 为准，不进入 Markdown、向量和记忆维护流程

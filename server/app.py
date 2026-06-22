@@ -14,8 +14,11 @@ from memoria.core import (
     store, recall, get_memory, delete_memory, restore_memory, purge_memory,
     update_tags, get_labels, get_stats, get_graph_data,
 )
+from memoria.records import (
+    RecordValidationError, add_record, query_records, summarize_records,
+)
 
-app = FastAPI(title="Memoria", version="6.10.0")
+app = FastAPI(title="Memoria", version="6.11.0")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -44,6 +47,20 @@ class MergeRequest(BaseModel):
     ids: list[str]
     merged_content: str
     tags: Optional[list[str]] = None
+
+
+class RecordRequest(BaseModel):
+    user_id: str
+    record_type: str
+    occurred_at: str
+    data: dict
+    timezone: str = "Asia/Shanghai"
+    schema_version: int = 1
+    note: Optional[str] = None
+    source: str = "manual"
+    source_agent: Optional[str] = None
+    source_run_id: Optional[str] = None
+    dedupe_key: Optional[str] = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -156,6 +173,71 @@ async def stats():
 @app.get("/api/graph")
 async def graph_data(private: bool = False):
     return get_graph_data(private=private)
+
+
+@app.post("/api/records")
+async def create_record(req: RecordRequest):
+    try:
+        return add_record(
+            user_id=req.user_id,
+            record_type=req.record_type,
+            occurred_at=req.occurred_at,
+            data=req.data,
+            timezone_name=req.timezone,
+            schema_version=req.schema_version,
+            note=req.note,
+            source=req.source,
+            source_agent=req.source_agent,
+            source_run_id=req.source_run_id,
+            dedupe_key=req.dedupe_key,
+        )
+    except RecordValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/records")
+async def list_records(
+    user_id: str,
+    record_type: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    local_date: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    try:
+        records = query_records(
+            user_id=user_id,
+            record_type=record_type,
+            start=start,
+            end=end,
+            local_date=local_date,
+            limit=limit,
+            offset=offset,
+        )
+        return {"records": records, "count": len(records)}
+    except RecordValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/api/records/summary")
+async def record_summary(
+    user_id: str,
+    record_type: str = "fitness",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    local_date: Optional[str] = None,
+):
+    try:
+        return summarize_records(
+            user_id=user_id,
+            record_type=record_type,
+            start=start,
+            end=end,
+            local_date=local_date,
+        )
+    except RecordValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def main():

@@ -36,6 +36,9 @@ from memoria.core import (
     store, recall, get_memory, delete_memory, restore_memory, purge_memory,
     update_tags, get_labels, get_stats, export_memories, import_memories,
 )
+from memoria.records import (
+    RecordValidationError, add_record, query_records, summarize_records,
+)
 
 
 def cmd_store(args):
@@ -205,6 +208,54 @@ def cmd_import(args):
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
+def _parse_record_data(raw: str) -> dict:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RecordValidationError(f"data must be valid JSON: {exc.msg}") from exc
+    if not isinstance(data, dict):
+        raise RecordValidationError("data must be a JSON object")
+    return data
+
+
+def cmd_record(args):
+    if args.record_action == "add":
+        result = add_record(
+            user_id=args.user_id,
+            record_type=args.type,
+            occurred_at=args.occurred_at,
+            timezone_name=args.timezone,
+            data=_parse_record_data(args.data),
+            schema_version=args.schema_version,
+            note=args.note,
+            source=args.source,
+            source_agent=args.source_agent,
+            source_run_id=args.source_run_id,
+            dedupe_key=args.dedupe_key,
+        )
+    elif args.record_action == "query":
+        result = query_records(
+            user_id=args.user_id,
+            record_type=args.type,
+            start=args.start,
+            end=args.end,
+            local_date=args.local_date,
+            limit=args.limit,
+            offset=args.offset,
+        )
+    elif args.record_action == "summary":
+        result = summarize_records(
+            user_id=args.user_id,
+            record_type=args.type,
+            start=args.start,
+            end=args.end,
+            local_date=args.local_date,
+        )
+    else:
+        raise RecordValidationError("record action is required")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Memoria - AI Agent 通用记忆系统")
     sub = parser.add_subparsers(dest="command")
@@ -300,12 +351,52 @@ def main():
     p_import.add_argument("file", help="JSON 文件路径")
     p_import.set_defaults(func=cmd_import)
 
+    # record
+    p_record = sub.add_parser("record", help="新增和查询高频时序流水")
+    record_sub = p_record.add_subparsers(dest="record_action")
+
+    p_record_add = record_sub.add_parser("add", help="新增一条流水")
+    p_record_add.add_argument("--user-id", required=True)
+    p_record_add.add_argument("--type", required=True)
+    p_record_add.add_argument("--occurred-at", required=True, help="带时区的 ISO 8601 时间")
+    p_record_add.add_argument("--timezone", default="Asia/Shanghai")
+    p_record_add.add_argument("--data", required=True, help="JSON 对象")
+    p_record_add.add_argument("--schema-version", type=int, default=1)
+    p_record_add.add_argument("--note", default=None)
+    p_record_add.add_argument("--source", default="manual")
+    p_record_add.add_argument("--source-agent", default=None)
+    p_record_add.add_argument("--source-run-id", default=None)
+    p_record_add.add_argument("--dedupe-key", default=None)
+    p_record_add.set_defaults(func=cmd_record)
+
+    p_record_query = record_sub.add_parser("query", help="按用户、类型和时间查询流水")
+    p_record_query.add_argument("--user-id", required=True)
+    p_record_query.add_argument("--type", default=None)
+    p_record_query.add_argument("--from", dest="start", default=None)
+    p_record_query.add_argument("--to", dest="end", default=None)
+    p_record_query.add_argument("--local-date", default=None)
+    p_record_query.add_argument("--limit", type=int, default=100)
+    p_record_query.add_argument("--offset", type=int, default=0)
+    p_record_query.set_defaults(func=cmd_record)
+
+    p_record_summary = record_sub.add_parser("summary", help="汇总锻炼流水")
+    p_record_summary.add_argument("--user-id", required=True)
+    p_record_summary.add_argument("--type", default="fitness")
+    p_record_summary.add_argument("--from", dest="start", default=None)
+    p_record_summary.add_argument("--to", dest="end", default=None)
+    p_record_summary.add_argument("--local-date", default=None)
+    p_record_summary.set_defaults(func=cmd_record)
+
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
         sys.exit(1)
 
-    args.func(args)
+    try:
+        args.func(args)
+    except RecordValidationError as exc:
+        print(json.dumps({"error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":

@@ -41,8 +41,9 @@ from memoria.core import (
     get_labels,
     get_stats,
 )
+from memoria.records import add_record, query_records, summarize_records
 
-server = Server("memoria", version="6.10.0")
+server = Server("memoria", version="6.11.0")
 
 
 def _split_tags(raw: str) -> list[str]:
@@ -144,6 +145,59 @@ _TOOLS = [
             },
         },
     ),
+    Tool(
+        name="memoria_record_add",
+        description="新增一条高频时序流水，不写入长期记忆。user_id 必填，data 必须是对象，occurred_at 必须带时区。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string"},
+                "record_type": {"type": "string", "default": "fitness"},
+                "occurred_at": {"type": "string", "description": "带时区的 ISO 8601 时间"},
+                "timezone": {"type": "string", "default": "Asia/Shanghai"},
+                "data": {"type": "object"},
+                "schema_version": {"type": "integer", "default": 1},
+                "note": {"type": "string", "default": ""},
+                "source": {"type": "string", "default": "manual"},
+                "source_agent": {"type": "string", "default": ""},
+                "source_run_id": {"type": "string", "default": ""},
+                "dedupe_key": {"type": "string", "default": ""},
+            },
+            "required": ["user_id", "record_type", "occurred_at", "data"],
+        },
+    ),
+    Tool(
+        name="memoria_record_query",
+        description="按用户、类型和时间查询高频流水。流水不是长期记忆，user_id 必填。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string"},
+                "record_type": {"type": "string", "default": ""},
+                "start": {"type": "string", "default": ""},
+                "end": {"type": "string", "default": ""},
+                "local_date": {"type": "string", "default": ""},
+                "limit": {"type": "integer", "default": 100},
+                "offset": {"type": "integer", "default": 0},
+            },
+            "required": ["user_id"],
+        },
+    ),
+    Tool(
+        name="memoria_record_summary",
+        description="汇总某个用户的锻炼流水。时间参数必须带时区，user_id 必填。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string"},
+                "record_type": {"type": "string", "default": "fitness"},
+                "start": {"type": "string", "default": ""},
+                "end": {"type": "string", "default": ""},
+                "local_date": {"type": "string", "default": ""},
+            },
+            "required": ["user_id"],
+        },
+    ),
 ]
 
 _TOOL_MAP = {t.name: t for t in _TOOLS}
@@ -204,6 +258,38 @@ async def handle_call_tool(name: str, arguments: dict):
             result = get_labels(
                 limit=arguments.get("limit", 0),
                 include_private=arguments.get("include_private", False),
+            )
+        elif name == "memoria_record_add":
+            result = add_record(
+                user_id=arguments["user_id"],
+                record_type=arguments.get("record_type", "fitness"),
+                occurred_at=arguments["occurred_at"],
+                timezone_name=arguments.get("timezone", "Asia/Shanghai"),
+                data=arguments["data"],
+                schema_version=arguments.get("schema_version", 1),
+                note=arguments.get("note") or None,
+                source=arguments.get("source", "manual"),
+                source_agent=arguments.get("source_agent") or None,
+                source_run_id=arguments.get("source_run_id") or None,
+                dedupe_key=arguments.get("dedupe_key") or None,
+            )
+        elif name == "memoria_record_query":
+            result = query_records(
+                user_id=arguments["user_id"],
+                record_type=arguments.get("record_type") or None,
+                start=arguments.get("start") or None,
+                end=arguments.get("end") or None,
+                local_date=arguments.get("local_date") or None,
+                limit=arguments.get("limit", 100),
+                offset=arguments.get("offset", 0),
+            )
+        elif name == "memoria_record_summary":
+            result = summarize_records(
+                user_id=arguments["user_id"],
+                record_type=arguments.get("record_type", "fitness"),
+                start=arguments.get("start") or None,
+                end=arguments.get("end") or None,
+                local_date=arguments.get("local_date") or None,
             )
         else:
             return [TextContent(type="text", text=json.dumps({"error": f"unknown tool: {name}"}, ensure_ascii=False))]

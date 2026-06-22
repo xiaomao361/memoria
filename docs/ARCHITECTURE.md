@@ -1,13 +1,14 @@
-# Memoria v6.10.0 架构设计文档
+# Memoria v6.11.0 架构设计文档
 
-> 适用版本: v6.10.0
-> 最后更新: 2026-06-17
+> 适用版本: v6.11.0
+> 最后更新: 2026-06-22
 
 ---
 
 ## 1. 设计原则
 
-- **store/*.md 是唯一真实来源** — 所有索引（SQLite、向量）都可从文件重建
+- **记忆以 store/*.md 为唯一真实来源** — 记忆索引（SQLite、向量）都可从文件重建
+- **流水以 SQLite 为真实来源** — 高频时序数据不写 Markdown，不进入记忆索引
 - **写入幂等** — 相同 ID 多次写入覆盖而非重复
 - **索引与数据分离** — 索引损坏不丢数据，`maintain rebuild` 恢复
 - **不内置 LLM 推理** — 系统只做存储+检索，聚合/提炼由调用方 agent 完成
@@ -93,7 +94,27 @@ CREATE TABLE labels (
 CREATE VIRTUAL TABLE memories_fts USING fts5(
     id UNINDEXED, summary, content, tokenize='unicode61'
 );
+
+CREATE TABLE records (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    record_type TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    local_date TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    data_json TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    note TEXT,
+    source TEXT DEFAULT 'manual',
+    source_agent TEXT,
+    source_run_id TEXT,
+    dedupe_key TEXT,
+    created_at TEXT NOT NULL
+);
 ```
+
+`records` 与记忆表共用 `memoria.db`，但生命周期完全分开。`maintain rebuild`
+只清理并重建 `memories`、`labels`、`memories_fts` 和向量，不操作 `records`。
 
 ### 2.3 向量库
 
@@ -201,6 +222,9 @@ MCP 层只做协议包装，不重写业务逻辑；所有工具都复用 `core.
 - `memoria_tag`
 - `memoria_stats`
 - `memoria_labels`
+- `memoria_record_add`
+- `memoria_record_query`
+- `memoria_record_summary`
 
 ---
 
@@ -226,6 +250,9 @@ conda run -n zhouwei python3 server/app.py --port 8000
 | GET | /api/search?q=xxx | 语义搜索 |
 | GET | /api/stats | 统计 |
 | GET | /api/graph | 关系图数据（动态生成） |
+| POST | /api/records | 新增流水 |
+| GET | /api/records | 按用户、类型、时间查询流水 |
+| GET | /api/records/summary | 汇总锻炼流水 |
 
 ### 前端界面
 
@@ -241,7 +268,24 @@ conda run -n zhouwei python3 server/app.py --port 8000
 
 ---
 
-## 10. 配置
+## 10. 流水记录
+
+`memoria/records.py` 是唯一业务实现，CLI、HTTP API 和 MCP 只做参数转换。
+
+第一版支持：
+
+- `fitness` v1 结构化字段校验
+- 按用户隔离
+- 带时区的发生时间和本地日期
+- 防重复键
+- 时间范围 `[start, end)` 查询
+- 步数、时长、距离、次数和组数汇总
+
+流水不进入 `store/*.md`、ChromaDB、FTS、`recall()`、importance 或任何记忆维护任务。
+
+---
+
+## 11. 配置
 
 集中在 `memoria/config.py`：
 
@@ -258,7 +302,7 @@ conda run -n zhouwei python3 server/app.py --port 8000
 
 ---
 
-## 11. 目录结构
+## 12. 目录结构
 
 ```
 ./
@@ -270,6 +314,7 @@ conda run -n zhouwei python3 server/app.py --port 8000
 │   ├── config.py             # 配置
 │   ├── core.py               # 核心逻辑（store/recall/manage）
 │   ├── db.py                 # SQLite
+│   ├── records.py            # 高频时序流水
 │   ├── vector.py             # ChromaDB + Ollama
 │   ├── filestore.py          # 文件读写
 │   └── maintain.py           # 维护任务
@@ -278,4 +323,5 @@ conda run -n zhouwei python3 server/app.py --port 8000
 │   ├── mcp.py                # MCP stdio 常驻进程
 │   └── static/index.html     # 中文前端（概览/搜索/图谱/标签/列表）
 ├── cli.py                    # CLI 入口
+├── tests/                    # 临时根目录下运行的自动测试
 ```
