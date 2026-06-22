@@ -325,3 +325,6 @@ conda run -n zhouwei python3 server/app.py --port 8000
 ├── cli.py                    # CLI 入口
 ├── tests/                    # 临时根目录下运行的自动测试
 ```
+
+本项目只保留当前有效文档。旧升级计划、开发任务书和种子讨论由 Git 历史保存，
+避免过期方案与现状同时存在。
