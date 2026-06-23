@@ -204,12 +204,12 @@ cli.py maintain audit-quality --public-only --limit 20
 
 ## 8. MCP 常驻进程
 
-`server/mcp.py` 提供 stdio transport，可被 Claude Code 等 MCP 客户端挂载。
+`server/mcp_server.py` 提供 stdio transport，可被 Claude Code 等 MCP 客户端挂载。
 
 启动：
 
 ```bash
-conda run -n zhouwei python3 server/mcp.py
+conda run -n zhouwei python3 server/mcp_server.py
 ```
 
 MCP 层只做协议包装，不重写业务逻辑；所有工具都复用 `core.py`：

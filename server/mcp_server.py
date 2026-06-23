@@ -5,11 +5,11 @@
 每个 MCP tool 直接映射到 memoria.core 的对应函数。
 
 使用方式:
-    python3 server/mcp.py
+    python3 server/mcp_server.py
     # Claude Code settings.json:
     # { "mcpServers": { "memoria": {
     #     "command": "python3",
-    #     "args": ["/path/to/server/mcp.py"]
+    #     "args": ["/path/to/server/mcp_server.py"]
     # }}}
 """
 
@@ -18,12 +18,10 @@ import json
 import sys
 from pathlib import Path
 
+# 文件名为 mcp_server.py，不与官方 mcp 包同名，可直接 import。
+# 只需把项目根加入 sys.path，让 `import memoria.*` 可被解析。
 SERVER_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SERVER_DIR.parent
-sys.path = [
-    path for path in sys.path
-    if path and Path(path).resolve() != SERVER_DIR
-]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from mcp.server import Server

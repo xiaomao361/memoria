@@ -292,7 +292,7 @@ conda run -n zhouwei python3 server/app.py --port 8000
 ## MCP 常驻进程
 
 ```bash
-conda run -n zhouwei python3 server/mcp.py
+conda run -n zhouwei python3 server/mcp_server.py
 ```
 
 给 Claude Code 等 MCP 客户端挂载时使用。工具包括写入、检索、读取详情、删除、恢复、标签管理、统计和标签列表。
@@ -322,5 +322,5 @@ vectors/    →  ChromaDB + Ollama bge-m3（语义检索，可重建）
 - 索引损坏时 `maintain rebuild` 从文件重建
 - 日常命令通过 `cli.py` 入口
 - Web 管理通过 `server/app.py` 提供 REST API + 前端
-- MCP 常驻进程通过 `server/mcp.py` 提供 stdio 工具
+- MCP 常驻进程通过 `server/mcp_server.py` 提供 stdio 工具
 - 流水以 SQLite 为准，不进入 Markdown、向量和记忆维护流程

@@ -193,7 +193,7 @@ conda run -n zhouwei python3 server/app.py --port 8000
 
 启动：
 ```bash
-conda run -n zhouwei python3 server/mcp.py
+conda run -n zhouwei python3 server/mcp_server.py
 ```
 
 Claude Code 配置示例：
@@ -203,7 +203,7 @@ Claude Code 配置示例：
   "mcpServers": {
     "memoria": {
       "command": "conda",
-      "args": ["run", "-n", "zhouwei", "python3", "/Users/zhouwei/Documents/ClaraCore/skills/memoria/server/mcp.py"]
+      "args": ["run", "-n", "zhouwei", "python3", "/Users/zhouwei/Documents/ClaraCore/skills/memoria/server/mcp_server.py"]
     }
   }
 }
