@@ -203,7 +203,7 @@ Claude Code 配置示例：
   "mcpServers": {
     "memoria": {
       "command": "conda",
-      "args": ["run", "-n", "zhouwei", "python3", "/Users/zhouwei/Documents/ClaraCore/skills/memoria/server/mcp_server.py"]
+      "args": ["run", "-n", "zhouwei", "python3", "/Users/zhouwei/Documents/ClaraCore/services/memoria/server/mcp_server.py"]
     }
   }
 }
