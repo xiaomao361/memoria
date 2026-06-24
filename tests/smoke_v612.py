@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-TEMP_ROOT = Path(tempfile.mkdtemp(prefix="memoria-v611-smoke-"))
+TEMP_ROOT = Path(tempfile.mkdtemp(prefix="memoria-v612-smoke-"))
 os.environ["MEMORIA_ROOT"] = str(TEMP_ROOT)
 sys.path.insert(0, str(ROOT))
 
@@ -48,7 +48,7 @@ def mcp_summary() -> dict:
         request("initialize", {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": {"name": "v611-smoke", "version": "1"},
+            "clientInfo": {"name": "v612-smoke", "version": "1"},
         })
         process.stdin.write(json.dumps({
             "jsonrpc": "2.0",
@@ -110,13 +110,13 @@ def main():
         assert summary["total_duration_minutes"] == 150
 
         memory = store(
-            content="Memoria v6.11 临时闭环回归记录",
-            tags=["codex", "v6.11-smoke"],
+            content="Memoria v6.12 临时闭环回归记录",
+            tags=["codex", "v6.12-smoke"],
             source="codex",
             source_agent="codex",
         )
         recalled = recall(memory_id=memory["id"], include_content=True)
-        assert recalled and recalled[0]["content"] == "Memoria v6.11 临时闭环回归记录"
+        assert recalled and recalled[0]["content"] == "Memoria v6.12 临时闭环回归记录"
         assert purge_memory(memory["id"])
 
         via_mcp = mcp_summary()

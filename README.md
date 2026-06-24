@@ -1,4 +1,4 @@
-# Memoria v6.11.0 — AI Agent 通用记忆系统
+# Memoria v6.12.0 — AI Agent 通用记忆系统
 
 > 跨会话记忆持久化。SQLite + 向量语义检索 + Markdown 文件存储。
 
@@ -237,6 +237,7 @@ conda run -n zhouwei python -m unittest discover -s tests -v
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v6.12.0 | 2026-06-24 | 新增流水记录：record_add (写入)、record_query (查询)、record_summary (汇总)；CLI/HTTP/MCP 三入口统一；v6.11 流水写入合并入 record_add |
 | v6.11.0 | 2026-06-22 | 新增独立流水记录：SQLite 单表、fitness v1 字段校验、防重复、按用户/类型/时间查询、基础汇总，以及 CLI / HTTP / MCP 三个入口 |
 | v6.10.0 | 2026-06-16 | BM25 多信号检索（向量 + FTS5 BM25 + 标签实体匹配）；新增 MCP stdio 常驻进程；修复查询翻页候选不足问题 |
 | v6.9.1 | 2026-06-16 | RRF 混合检索（向量+FTS 并行 → RRF 融合 + importance 加权）；事实边界检查内置到 store()；移除 candidate/agent/recall-context；删除 adapters/、migrate.py；前端精简 |
