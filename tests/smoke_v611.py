@@ -21,7 +21,7 @@ from memoria.records import add_record, query_records, summarize_records
 def mcp_summary() -> dict:
     env = os.environ.copy()
     process = subprocess.Popen(
-        [sys.executable, str(ROOT / "server" / "mcp.py")],
+        [sys.executable, str(ROOT / "server" / "mcp_server.py")],
         cwd=ROOT,
         env=env,
         stdin=subprocess.PIPE,

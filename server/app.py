@@ -18,7 +18,7 @@ from memoria.records import (
     RecordValidationError, add_record, query_records, summarize_records,
 )
 
-app = FastAPI(title="Memoria", version="6.11.0")
+app = FastAPI(title="Memoria", version="6.12.0")
 
 STATIC_DIR = Path(__file__).parent / "static"
 

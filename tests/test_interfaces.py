@@ -116,7 +116,7 @@ print(json.dumps({
 class RawMcpClient:
     def __init__(self, env):
         self.proc = subprocess.Popen(
-            [sys.executable, str(ROOT / "server" / "mcp.py")],
+            [sys.executable, str(ROOT / "server" / "mcp_server.py")],
             cwd=ROOT,
             env=env,
             stdin=subprocess.PIPE,
@@ -179,12 +179,34 @@ class McpTests(unittest.TestCase):
             client.notify("notifications/initialized")
             listed = client.request("tools/list")
             names = {tool["name"] for tool in listed["result"]["tools"]}
-            self.assertEqual(11, len(names))
+            self.assertEqual(12, len(names))
             self.assertTrue({
+                "memoria_update",
                 "memoria_record_add",
                 "memoria_record_query",
                 "memoria_record_summary",
             }.issubset(names))
+            stored = self.tool_data(client.request("tools/call", {
+                "name": "memoria_store",
+                "arguments": {"content": "原始内容", "tags": "旧标签"},
+            }))
+            updated = self.tool_data(client.request("tools/call", {
+                "name": "memoria_update",
+                "arguments": {
+                    "memory_id": stored["id"],
+                    "content": "更新后的内容",
+                    "tags": "新标签",
+                    "private": True,
+                },
+            }))
+            fetched = self.tool_data(client.request("tools/call", {
+                "name": "memoria_get",
+                "arguments": {"memory_id": stored["id"]},
+            }))
+            self.assertEqual(stored["id"], updated["id"])
+            self.assertEqual("更新后的内容", fetched["content"])
+            self.assertEqual(["新标签"], fetched["tags"])
+            self.assertTrue(fetched["private"])
             args = {
                 "user_id": "zhouwei",
                 "record_type": "fitness",

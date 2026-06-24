@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from memoria.core import (
     store, recall, get_memory, delete_memory, restore_memory, purge_memory,
-    update_tags, get_labels, get_stats, export_memories, import_memories,
+    update_memory, update_tags, get_labels, get_stats, export_memories, import_memories,
 )
 from memoria.records import (
     RecordValidationError, add_record, query_records, summarize_records,
@@ -115,6 +115,20 @@ def cmd_tag(args):
     remove = [t.strip() for t in args.remove.split(",") if t.strip()] if args.remove else None
     ok = update_tags(args.id, add=add, remove=remove)
     print(json.dumps({"id": args.id, "updated": ok}))
+
+
+def cmd_update(args):
+    content = args.content
+    if content == "-":
+        content = sys.stdin.read()
+    tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else None
+    private = None
+    if args.private:
+        private = True
+    elif args.public:
+        private = False
+    result = update_memory(memory_id=args.id, content=content, tags=tags, private=private)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def cmd_get(args):
@@ -321,6 +335,16 @@ def main():
     p_tag.add_argument("--add", default=None, help="添加标签，逗号分隔")
     p_tag.add_argument("--remove", default=None, help="移除标签，逗号分隔")
     p_tag.set_defaults(func=cmd_tag)
+
+    # update
+    p_update = sub.add_parser("update", help="编辑记忆内容、标签与私密标记")
+    p_update.add_argument("id", help="记忆 ID")
+    p_update.add_argument("--content", required=True, help="新内容（传 - 从 stdin 读取）")
+    p_update.add_argument("--tags", default=None, help="新标签，逗号分隔（覆盖）")
+    priv_group = p_update.add_mutually_exclusive_group()
+    priv_group.add_argument("--private", action="store_true", help="标记为私密")
+    priv_group.add_argument("--public", action="store_true", help="标记为公开")
+    p_update.set_defaults(func=cmd_update)
 
     # maintain
     p_maint = sub.add_parser("maintain", help="维护任务")

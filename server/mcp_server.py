@@ -35,13 +35,14 @@ from memoria.core import (
     delete_memory,
     restore_memory,
     purge_memory,
+    update_memory,
     update_tags,
     get_labels,
     get_stats,
 )
 from memoria.records import add_record, query_records, summarize_records
 
-server = Server("memoria", version="6.11.0")
+server = Server("memoria", version="6.12.0")
 
 
 def _split_tags(raw: str) -> list[str]:
@@ -125,6 +126,20 @@ _TOOLS = [
                 "remove": {"type": "string", "default": ""},
             },
             "required": ["memory_id"],
+        },
+    ),
+    Tool(
+        name="memoria_update",
+        description="编辑已有记忆的内容、标签和私密标记。ID 必须已存在，否则报错。tags 逗号分隔，不传则保留现有标签。private 不传则保留现有标记。",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "memory_id": {"type": "string", "description": "要编辑的记忆 ID"},
+                "content": {"type": "string", "description": "新的完整内容"},
+                "tags": {"type": "string", "default": "", "description": "新标签，逗号分隔（覆盖现有标签）"},
+                "private": {"type": "boolean", "description": "设为 true 标记私密，false 标记公开，不传保留原样"},
+            },
+            "required": ["memory_id", "content"],
         },
     ),
     Tool(
@@ -250,6 +265,16 @@ async def handle_call_tool(name: str, arguments: dict):
             remove_list = _split_tags(arguments.get("remove", "")) if arguments.get("remove") else None
             ok = update_tags(arguments["memory_id"], add=add_list, remove=remove_list)
             result = {"id": arguments["memory_id"], "updated": ok}
+        elif name == "memoria_update":
+            tags_raw = arguments.get("tags", "")
+            tag_list = _split_tags(tags_raw) if tags_raw else None
+            private_val = arguments.get("private")
+            result = update_memory(
+                memory_id=arguments["memory_id"],
+                content=arguments["content"],
+                tags=tag_list,
+                private=private_val,
+            )
         elif name == "memoria_stats":
             result = get_stats()
         elif name == "memoria_labels":

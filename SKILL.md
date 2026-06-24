@@ -180,6 +180,14 @@ conda run -n zhouwei python3 cli.py delete --purge <uuid>
 
 # 管理标签
 conda run -n zhouwei python3 cli.py tag <uuid> --add "new_tag" --remove "old_tag"
+
+# 编辑记忆内容与标签（ID 必须已存在）
+conda run -n zhouwei python3 cli.py update <uuid> --content "修正后的内容" --tags "tag1,tag2"
+# 只改内容不碰标签：
+conda run -n zhouwei python3 cli.py update <uuid> --content "修正后的内容"
+# 翻私密/公开标记（--private/--public 互斥，不传则保留原样）：
+conda run -n zhouwei python3 cli.py update <uuid> --content "修正后的内容" --private
+conda run -n zhouwei python3 cli.py update <uuid> --content "修正后的内容" --public
 ```
 
 ---
@@ -192,7 +200,7 @@ conda run -n zhouwei python3 cli.py tag <uuid> --add "new_tag" --remove "old_tag
 | 强度 | 降 | `maintain dormant` | 自动 |
 | 数量 | 合 | `maintain suggest-merge` → `store --merge-from` | LLM 判断 |
 | 数量 | 删 | `delete` / `delete --purge` | LLM / 人工 |
-| 内容 | 改 | `maintain suggest-conflicts` → `tag --add outdated` 或重写 | LLM 判断 |
+| 内容 | 改 | `update` / `maintain suggest-conflicts` → `tag --add outdated` | LLM / 人工 |
 
 `maintain nightly` 一次性跑完自动部分，产出待裁决候选清单。
 
@@ -295,7 +303,7 @@ conda run -n zhouwei python3 server/app.py --port 8000
 conda run -n zhouwei python3 server/mcp_server.py
 ```
 
-给 Claude Code 等 MCP 客户端挂载时使用。工具包括写入、检索、读取详情、删除、恢复、标签管理、统计和标签列表。
+给 Claude Code 等 MCP 客户端挂载时使用。工具包括写入、检索、读取详情、编辑、删除、恢复、标签管理、统计和标签列表。
 
 ---
 

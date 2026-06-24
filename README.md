@@ -72,7 +72,7 @@ memoria/                      # Python 包
 └── maintain.py               # 维护任务
 server/
 ├── app.py                    # FastAPI Web 服务
-├── mcp.py                    # MCP stdio 常驻进程
+├── mcp_server.py             # MCP stdio 常驻进程
 └── static/index.html         # 前端
 cli.py                        # CLI 入口
 ```

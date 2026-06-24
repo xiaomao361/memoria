@@ -721,6 +721,32 @@ def purge_memory(memory_id: str) -> bool:
     return True
 
 
+def update_memory(memory_id: str, content: str, tags: Optional[list[str]] = None, private: Optional[bool] = None) -> dict:
+    """编辑已有记忆的内容和/或标签/私密标记。必须已存在，否则返回 error。"""
+    init_db()
+    existing = get_memory(memory_id)
+    if not existing:
+        return {"error": "not found", "id": memory_id}
+
+    return store(
+        content=content,
+        tags=tags if tags is not None else existing.get("tags", []),
+        source=existing.get("source", "manual"),
+        private=private if private is not None else existing.get("private", False),
+        memory_id=memory_id,
+        kind=existing.get("kind", "fact"),
+        authority=existing.get("authority", "confirmed"),
+        retrieval_role=existing.get("retrieval_role", "background"),
+        confidence=existing.get("confidence", 1.0),
+        status=existing.get("status", "active"),
+        superseded_by=existing.get("superseded_by"),
+        valid_from=existing.get("valid_from"),
+        valid_until=existing.get("valid_until"),
+        source_agent=existing.get("source_agent"),
+        source_run_id=existing.get("source_run_id"),
+    )
+
+
 def update_tags(memory_id: str, add: list[str] = None, remove: list[str] = None) -> bool:
     """更新标签"""
     init_db()
